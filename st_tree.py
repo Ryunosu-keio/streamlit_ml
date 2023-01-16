@@ -73,9 +73,10 @@ if uploaded_file :
         test_conf = confusion_matrix(Y_test, pred_test)
         test_conf
         clf.best_params_
-        tr.visualize(clf_model, features, 'test')
-        image = Image.open('output/test.png')
-        st.image(image, caption='サンプル',use_column_width=True)
+        graph = tr.visualize(clf_model, features)
+        # image = Image.open('output/test.png')
+        # st.image(image, caption='サンプル',use_column_width=True)
+        st.graphviz_chart(graph)
         # if st.checkbox("重要度"):
         fig = tr.importance(clf_model, features)
         st.pyplot(fig)
