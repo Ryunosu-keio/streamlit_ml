@@ -58,7 +58,7 @@ def dataset(path, target):
 def visualize(clf_model, features):
     dot_data = export_graphviz(clf_model, feature_names=features, class_names=["-1","0","1","2","3","4"])
     graph = graphviz.Source(dot_data)
-    return graph
+    return dot_data
     # graph.render("output/" + name, format='png')
 
 
