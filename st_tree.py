@@ -74,7 +74,6 @@ if uploaded_file :
         test_conf
         clf.best_params_
         graph = tr.visualize(clf_model, features)
-        graph
         # image = Image.open('output/test.png')
         # st.image(image, caption='サンプル',use_column_width=True)
         st.graphviz_chart(graph)
