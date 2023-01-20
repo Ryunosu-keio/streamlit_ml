@@ -63,13 +63,10 @@ def visualize(clf_model, features): #枝分かれの可視化図
     # graph.render("output/" + name, format='png')
 
 
-def grid_search(train_X, train_Y, params):
-    clf = GridSearchCV(DecisionTreeClassifier(),   # グリッドサーチで決定木を定義
+def grid_search(model, train_X, train_Y, params):
+    clf = GridSearchCV(model,   # グリッドサーチで決定木を定義
                    params, cv=5)
     clf.fit(train_X, train_Y)
-    # best_scores = clf.cv_results_['mean_test_score']
-    # best_params = clf.cv_results_['params']
-    # best_clf = clf.best_estimator_
     return clf
 
 # def importance_viz(clf):
