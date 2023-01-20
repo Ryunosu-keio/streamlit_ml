@@ -13,10 +13,12 @@ import numpy as np
 import warnings
 from PIL import Image
 
-tab1, tab2, tab3, tab4 = st.tabs(["決定木", "ランダムフォレスト", "SVM", "NN"])
-
 st.title("機械学習")
 st.sidebar.title("ハイパーパラメータ")
+
+tab1, tab2, tab3, tab4 = st.tabs(["決定木", "ランダムフォレスト", "SVM", "NN"])
+
+
 
 warnings.simplefilter('ignore')
 
