@@ -81,7 +81,7 @@ if uploaded_file :
         st.download_button(
            label="Download data",
            data=csv,
-           file_name="test",
+           file_name="test.csv",
            mime="text/csv",
         )
         clf.best_params_
