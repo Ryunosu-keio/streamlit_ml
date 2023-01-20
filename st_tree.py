@@ -15,6 +15,10 @@ from PIL import Image
 
 warnings.simplefilter('ignore')
 
+@st.cache
+def convert_df(df)
+    return df.to_csv().encode('utf-8')
+
 
 # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
 
@@ -72,6 +76,14 @@ if uploaded_file :
         st.write(clf_model.score(X_test, Y_test))
         test_conf = confusion_matrix(Y_test, pred_test)
         test_conf
+        df = pd.DataFrame(test_conf)
+        csv = convert_df(df)
+        st.download_button(
+           label="Download data",
+           data=csv,
+           file_name="test",
+           mime="text/csv",
+        )
         clf.best_params_
         graph = tr.visualize(clf_model, features)
         # image = Image.open('output/test.png')
