@@ -102,10 +102,10 @@ with tab1:
 with tab2:
     st.sidebar.title("ハイパーパラメータ")
     estim = st.sidebar.slider('n_estimators')
-    depth = st.sidebar.slider('max_depth', 1, 10, (2, 4))
-    min_split = st.sidebar.slider('min_sample_split', 1, 10, (2, 3))
-    leaf = st.sidebar.slider('min_sample_leaf', 1, 10, (1, 2))
-    random_state = st.sidebar.slider('random_state', 0, 30, (0, 3))
+    depth = st.sidebar.slider('max_depth1', 1, 10, (2, 4))
+    min_split = st.sidebar.slider('min_sample_split1', 1, 10, (2, 3))
+    leaf = st.sidebar.slider('min_sample_leaf1', 1, 10, (1, 2))
+    random_state = st.sidebar.slider('random_state1', 0, 30, (0, 3))
     params = {
         "criterion":["gini", "entropy"],
         # "splitter":"best",
