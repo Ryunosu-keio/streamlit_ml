@@ -40,11 +40,11 @@ params = {
         }
 
 def dataset(path, target):
-    df = pd.read_csv(path)
-    X = df.drop(target,axis=1)
-    Y = df[target]
-    features = X.columns
-    return X, Y, features
+    df = pd.read_csv(path) #csv取得
+    X = df.drop(target,axis=1) #説明変数だけ
+    Y = df[target] #目的変数
+    features = X.columns #特徴量の名前
+    return X, Y, features 
 
 # plt.figure(figsize=(12, 8))
 # mglearn.discrete_scatter(X[:, 0], X[:, 1], Y)
@@ -55,8 +55,8 @@ def dataset(path, target):
 #     clf_model.fit(X_train, Y_train)
 #     return clf_model
 
-def visualize(clf_model, features):
-    dot_data = export_graphviz(clf_model, feature_names=features, class_names=["-1","0","1","2","3","4"])
+def visualize(clf_model, features): #枝分かれの可視化図
+    dot_data = export_graphviz(clf_model, feature_names=features, class_names=["0","1","2","3","4","5"]) 
     graph = graphviz.Source(dot_data)
     return dot_data
     # graph.render("output/" + name, format='png')
