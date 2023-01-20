@@ -50,11 +50,14 @@ uploaded_file = st.file_uploader("Choose a CSV file", accept_multiple_files=Fals
 if uploaded_file :
     # df2 = pd.read_csv(uploaded_file)
     # df2
-    target = st.text_input("目的変数を入力してください")
+    df = pd.read_csv(uploaded_file)
+    features = df.columns
+    target = st.selectbox("目的変数を選択してください", features)
+    removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
+    name = st.text_input("ファイル名を入力してください")
     if st.button("モデル構築"):
         # name = uploaded_file.split(".")[0]
-        name = "test"
-        X, Y, features = tr.dataset(uploaded_file, target)
+        X, Y, features = tr.dataset(df, target, removal_feature)
         X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
         clf = tr.grid_search(X_train, Y_train, params)
         max_depth_ = clf.best_params_["max_depth"]

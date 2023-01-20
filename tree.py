@@ -39,12 +39,13 @@ params = {
         # "class_weight":"balanced"
         }
 
-def dataset(path, target):
-    df = pd.read_csv(path) #csv取得
+def dataset(df, target, removal): 
     X = df.drop(target,axis=1) #説明変数だけ
+    for i in range(len(removal)):
+        X = X.drop(removal[i], axis=1)
     Y = df[target] #目的変数
     features = X.columns #特徴量の名前
-    return X, Y, features 
+    return X, Y, features
 
 # plt.figure(figsize=(12, 8))
 # mglearn.discrete_scatter(X[:, 0], X[:, 1], Y)
