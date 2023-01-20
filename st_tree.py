@@ -19,6 +19,7 @@ st.title("機械学習")
 
 tab1, tab2, tab3, tab4 = st.tabs(["決定木", "ランダムフォレスト", "SVM", "NN"])
 
+st.sidebar.title("ハイパーパラメータ")
 
 
 warnings.simplefilter('ignore')
@@ -27,25 +28,26 @@ warnings.simplefilter('ignore')
 def convert_df(df):
     return df.to_csv().encode('utf-8')
 
+method = st.sidebar.selectbox("学習の種類",["tree","random_forest"])
 
 with tab1:
-    st.sidebar.title("ハイパーパラメータ")
-    depth = st.sidebar.slider('max_depth', 1, 10, (2, 4))
-    min_split = st.sidebar.slider('min_sample_split', 1, 10, (2, 3))
-    leaf = st.sidebar.slider('min_sample_leaf', 1, 10, (1, 2))
-    random_state = st.sidebar.slider('random_state', 0, 30, (0, 3))
-    params = {
-        "criterion":["gini", "entropy"],
-        # "splitter":"best",
-        "max_depth":[i for i in range(depth[0], depth[1])],
-        "min_samples_split":[i for i in range(min_split[0], min_split[1])],
-        "min_samples_leaf":[i for i in range(leaf[0], leaf[1])],
-        # "min_weight_fraction_leaf":0.0,
-        # "max_features":4,
-        "random_state":[i for i in range(random_state[0], random_state[1])],
-        # "max_leaf_nodes":8,
-        # "class_weight":"balanced"
-        }
+    if method == "tree":
+        depth = st.sidebar.slider('max_depth', 1, 10, (2, 4))
+        min_split = st.sidebar.slider('min_sample_split', 1, 10, (2, 3))
+        leaf = st.sidebar.slider('min_sample_leaf', 1, 10, (1, 2))
+        random_state = st.sidebar.slider('random_state', 0, 30, (0, 3))
+        params = {
+            "criterion":["gini", "entropy"],
+            # "splitter":"best",
+            "max_depth":[i for i in range(depth[0], depth[1])],
+            "min_samples_split":[i for i in range(min_split[0], min_split[1])],
+            "min_samples_leaf":[i for i in range(leaf[0], leaf[1])],
+            # "min_weight_fraction_leaf":0.0,
+            # "max_features":4,
+            "random_state":[i for i in range(random_state[0], random_state[1])],
+            # "max_leaf_nodes":8,
+            # "class_weight":"balanced"
+            }
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("決定木")
     # file1 = st.checkbox("ファイルをアップロード",False)
@@ -100,25 +102,25 @@ with tab1:
             st.pyplot(fig)
 
 with tab2:
-    st.sidebar.title("ハイパーパラメータ")
-    estim = st.sidebar.slider('n_estimators', 1, 50, (1,3))
-    depth = st.sidebar.slider('max_depth1', 1, 10, (2, 4))
-    min_split = st.sidebar.slider('min_sample_split1', 1, 10, (2, 3))
-    leaf = st.sidebar.slider('min_sample_leaf1', 1, 10, (1, 2))
-    random_state = st.sidebar.slider('random_state1', 0, 30, (0, 3))
-    params = {
-        "criterion":["gini", "entropy"],
-        # "splitter":"best",
-        "n_estimators":[i for i in range(estim[0], estim[1])],
-        "max_depth":[i for i in range(depth[0], depth[1])],
-        "min_samples_split":[i for i in range(min_split[0], min_split[1])],
-        "min_samples_leaf":[i for i in range(leaf[0], leaf[1])],
-        # "min_weight_fraction_leaf":0.0,
-        # "max_features":4,
-        "random_state":[i for i in range(random_state[0], random_state[1])],
-        # "max_leaf_nodes":8,
-        # "class_weight":"balanced"
-        }
+    if method == "random_forest":
+        estim = st.sidebar.slider('n_estimators')
+        depth = st.sidebar.slider('max_depth', 1, 10, (2, 4))
+        min_split = st.sidebar.slider('min_sample_split', 1, 10, (2, 3))
+        leaf = st.sidebar.slider('min_sample_leaf', 1, 10, (1, 2))
+        random_state = st.sidebar.slider('random_state', 0, 30, (0, 3))
+        params = {
+            "criterion":["gini", "entropy"],
+            # "splitter":"best",
+            "n_estimators":[i for i in range(estim[0], estim[1])],
+            "max_depth":[i for i in range(depth[0], depth[1])],
+            "min_samples_split":[i for i in range(min_split[0], min_split[1])],
+            "min_samples_leaf":[i for i in range(leaf[0], leaf[1])],
+            # "min_weight_fraction_leaf":0.0,
+            # "max_features":4,
+            "random_state":[i for i in range(random_state[0], random_state[1])],
+            # "max_leaf_nodes":8,
+            # "class_weight":"balanced"
+            }
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("ランダムフォレスト")
     # file1 = st.checkbox("ファイルをアップロード",False)
