@@ -101,7 +101,7 @@ with tab1:
 
 with tab2:
     st.sidebar.title("ハイパーパラメータ")
-    estim = st.sidebar.slider('n_estimators')
+    estim = st.sidebar.slider('n_estimators', 1, 50, (1,3))
     depth = st.sidebar.slider('max_depth1', 1, 10, (2, 4))
     min_split = st.sidebar.slider('min_sample_split1', 1, 10, (2, 3))
     leaf = st.sidebar.slider('min_sample_leaf1', 1, 10, (1, 2))
