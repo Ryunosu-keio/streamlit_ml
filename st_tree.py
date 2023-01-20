@@ -122,16 +122,16 @@ with tab2:
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("ランダムフォレスト")
     # file1 = st.checkbox("ファイルをアップロード",False)
-    uploaded_file = st.file_uploader("Choose a CSV file", accept_multiple_files=False)
+    uploaded_file = st.file_uploader("Choose a CSV file1", accept_multiple_files=False)
     if uploaded_file :
         # df2 = pd.read_csv(uploaded_file)
         # df2
         df = pd.read_csv(uploaded_file)
         features = df.columns
-        target = st.selectbox("目的変数を選択してください", features)
-        removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
-        name = st.text_input("ファイル名を入力してください")
-        if st.button("モデル構築"):
+        target = st.selectbox("目的変数を選択してください1", features)
+        removal_feature = st.multiselect("説明変数として使わない変数を選択してください1", features)
+        name = st.text_input("ファイル名を入力してください1")
+        if st.button("モデル構築1"):
             # name = uploaded_file.split(".")[0]
             X, Y, features = tr.dataset(df, target, removal_feature)
             X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
@@ -160,7 +160,7 @@ with tab2:
             df = pd.DataFrame(test_conf)
             csv = convert_df(df)
             st.download_button(
-            label="Download data",
+            label="Download data1",
             data=csv,
             file_name=name + ".csv",
             mime="text/csv",
