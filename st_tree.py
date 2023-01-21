@@ -127,6 +127,7 @@ with tab2:
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("ランダムフォレスト")
     # file1 = st.checkbox("ファイルをアップロード",False)
+
     if st.button("モデル構築"):
         # name = uploaded_file.split(".")[0]
         X, Y, features = tr.dataset(df, target, removal_feature)
@@ -145,6 +146,7 @@ with tab2:
             min_samples_split=min_samples_split_,
             min_samples_leaf=min_samples_leaf_,
             random_state=random_state_
+
             )
         clf_model.fit(X_train, Y_train)
         pred_train = clf_model.predict(X_train)
