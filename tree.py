@@ -8,6 +8,7 @@ from sklearn.metrics import confusion_matrix, accuracy_score, classification_rep
 import pandas as pd 
 import matplotlib.pyplot as plt
 import numpy as np
+import streamlit as st
 
 
 # features = ["section","online", "back car", "small car", 
@@ -39,6 +40,7 @@ params = {
         # "class_weight":"balanced"
         }
 
+@st.cache
 def dataset(df, target, removal): 
     X = df.drop(target,axis=1) #説明変数だけ
     for i in range(len(removal)):
@@ -62,7 +64,7 @@ def visualize(clf_model, features): #枝分かれの可視化図
     return dot_data
     # graph.render("output/" + name, format='png')
 
-
+@st.cache
 def grid_search(model, train_X, train_Y, params):
     clf = GridSearchCV(model,   # グリッドサーチで決定木を定義
                    params, cv=5)
