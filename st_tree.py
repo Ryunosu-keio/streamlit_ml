@@ -14,8 +14,19 @@ import warnings
 from PIL import Image
 
 from sklearn.ensemble import RandomForestClassifier as RFC
+from sklearn.svm import SVC
 
 st.title("機械学習")
+
+uploaded_file = st.file_uploader("Choose a CSV file", accept_multiple_files=False)
+if uploaded_file :
+    # df2 = pd.read_csv(uploaded_file)
+    # df2
+    df = pd.read_csv(uploaded_file)
+    features = df.columns
+    target = st.selectbox("目的変数を選択してください", features)
+    removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
+    name = st.text_input("ファイル名を入力してください")
 
 tab1, tab2, tab3, tab4 = st.tabs(["決定木", "ランダムフォレスト", "SVM", "NN"])
 
@@ -28,7 +39,8 @@ warnings.simplefilter('ignore')
 def convert_df(df):
     return df.to_csv().encode('utf-8')
 
-method = st.sidebar.selectbox("学習の種類",["tree","random_forest"])
+method = st.sidebar.selectbox("学習の種類",["tree","random_forest","SVM","NN"])
+
 
 with tab1:
     if method == "tree":
@@ -51,59 +63,50 @@ with tab1:
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("決定木")
     # file1 = st.checkbox("ファイルをアップロード",False)
-    uploaded_file = st.file_uploader("Choose a CSV file", accept_multiple_files=False)
-    if uploaded_file :
-        # df2 = pd.read_csv(uploaded_file)
-        # df2
-        df = pd.read_csv(uploaded_file)
-        features = df.columns
-        target = st.selectbox("目的変数を選択してください", features)
-        removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
-        name = st.text_input("ファイル名を入力してください")
-        if st.button("モデル構築"):
-            # name = uploaded_file.split(".")[0]
-            X, Y, features = tr.dataset(df, target, removal_feature)
-            X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
-            clf = tr.grid_search(DTC(), X_train, Y_train, params)
-            max_depth_ = clf.best_params_["max_depth"]
-            criterion_ = clf.best_params_["criterion"]
-            min_samples_split_ = clf.best_params_["min_samples_split"]
-            min_samples_leaf_ = clf.best_params_["min_samples_leaf"]
-            random_state_ = clf.best_params_["random_state"]
-            clf_model = DTC(
-                criterion=criterion_, 
-                max_depth=max_depth_, 
-                min_samples_split=min_samples_split_,
-                min_samples_leaf=min_samples_leaf_,
-                random_state=random_state_
-                )
-            clf_model.fit(X_train, Y_train)
-            pred_train = clf_model.predict(X_train)
-            st.write(clf_model.score(X_train, Y_train))
-            pred_test = clf_model.predict(X_test)
-            st.write(clf_model.score(X_test, Y_test))
-            test_conf = confusion_matrix(Y_test, pred_test)
-            test_conf
-            df = pd.DataFrame(test_conf)
-            csv = convert_df(df)
-            st.download_button(
-            label="Download data",
-            data=csv,
-            file_name=name+".csv",
-            mime="text/csv",
+    if st.button("決定木モデル構築"):
+        # name = uploaded_file.split(".")[0]
+        X, Y, features = tr.dataset(df, target, removal_feature)
+        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
+        clf = tr.grid_search(DTC(), X_train, Y_train, params)
+        max_depth_ = clf.best_params_["max_depth"]
+        criterion_ = clf.best_params_["criterion"]
+        min_samples_split_ = clf.best_params_["min_samples_split"]
+        min_samples_leaf_ = clf.best_params_["min_samples_leaf"]
+        random_state_ = clf.best_params_["random_state"]
+        clf_model = DTC(
+            criterion=criterion_, 
+            max_depth=max_depth_, 
+            min_samples_split=min_samples_split_,
+            min_samples_leaf=min_samples_leaf_,
+            random_state=random_state_
             )
-            clf.best_params_
-            graph = tr.visualize(clf_model, features)
-            # image = Image.open('output/test.png')
-            # st.image(image, caption='サンプル',use_column_width=True)
-            st.graphviz_chart(graph)
-            # if st.checkbox("重要度"):
-            fig = tr.importance(clf_model, features)
-            st.pyplot(fig)
+        clf_model.fit(X_train, Y_train)
+        pred_train = clf_model.predict(X_train)
+        st.write(clf_model.score(X_train, Y_train))
+        pred_test = clf_model.predict(X_test)
+        st.write(clf_model.score(X_test, Y_test))
+        test_conf = confusion_matrix(Y_test, pred_test)
+        test_conf
+        df = pd.DataFrame(test_conf)
+        csv = convert_df(df)
+        st.download_button(
+        label="Download data",
+        data=csv,
+        file_name=name+".csv",
+        mime="text/csv",
+        )
+        clf.best_params_
+        graph = tr.visualize(clf_model, features)
+        # image = Image.open('output/test.png')
+        # st.image(image, caption='サンプル',use_column_width=True)
+        st.graphviz_chart(graph)
+        # if st.checkbox("重要度"):
+        fig = tr.importance(clf_model, features)
+        st.pyplot(fig)
 
 with tab2:
     if method == "random_forest":
-        estim = st.sidebar.slider('n_estimators')
+        estim = st.sidebar.slider('n_estimators', 1, 100, (1, 50))
         depth = st.sidebar.slider('max_depth', 1, 10, (2, 4))
         min_split = st.sidebar.slider('min_sample_split', 1, 10, (2, 3))
         leaf = st.sidebar.slider('min_sample_leaf', 1, 10, (1, 2))
@@ -124,51 +127,86 @@ with tab2:
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("ランダムフォレスト")
     # file1 = st.checkbox("ファイルをアップロード",False)
-    uploaded_file = st.file_uploader("Choose a CSV file1", accept_multiple_files=False)
-    if uploaded_file :
-        # df2 = pd.read_csv(uploaded_file)
-        # df2
-        df = pd.read_csv(uploaded_file)
-        features = df.columns
-        target = st.selectbox("目的変数を選択してください1", features)
-        removal_feature = st.multiselect("説明変数として使わない変数を選択してください1", features)
-        name = st.text_input("ファイル名を入力してください1")
-        if st.button("モデル構築1"):
-            # name = uploaded_file.split(".")[0]
-            X, Y, features = tr.dataset(df, target, removal_feature)
-            X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
-            clf = tr.grid_search(RFC(), X_train, Y_train, params)
-            max_depth_ = clf.best_params_["max_depth"]
-            n_estimators_ = clf.best_params_["n_estimators"] 
-            criterion_ = clf.best_params_["criterion"]
-            min_samples_split_ = clf.best_params_["min_samples_split"]
-            min_samples_leaf_ = clf.best_params_["min_samples_leaf"]
-            random_state_ = clf.best_params_["random_state"]
-            clf_model = RFC(
-                n_estimators=n_estimators_,
-                criterion=criterion_, 
-                max_depth=max_depth_, 
-                min_samples_split=min_samples_split_,
-                min_samples_leaf=min_samples_leaf_,
-                random_state=random_state_
-                )
-            clf_model.fit(X_train, Y_train)
-            pred_train = clf_model.predict(X_train)
-            st.write(clf_model.score(X_train, Y_train))
-            pred_test = clf_model.predict(X_test)
-            st.write(clf_model.score(X_test, Y_test))
-            test_conf = confusion_matrix(Y_test, pred_test)
-            test_conf
-            df = pd.DataFrame(test_conf)
-            csv = convert_df(df)
-            st.download_button(
-            label="Download data1",
-            data=csv,
-            file_name=name + ".csv",
-            mime="text/csv",
-            )
-            clf.best_params_
 
-            # fig = tr.importance(clf_model, features)
-            # st.pyplot(fig)
+    if st.button("モデル構築"):
+        # name = uploaded_file.split(".")[0]
+        X, Y, features = tr.dataset(df, target, removal_feature)
+        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
+        clf = tr.grid_search(RFC(), X_train, Y_train, params)
+        max_depth_ = clf.best_params_["max_depth"]
+        n_estimators_ = clf.best_params_["n_estimators"] 
+        criterion_ = clf.best_params_["criterion"]
+        min_samples_split_ = clf.best_params_["min_samples_split"]
+        min_samples_leaf_ = clf.best_params_["min_samples_leaf"]
+        random_state_ = clf.best_params_["random_state"]
+        clf_model = RFC(
+            n_estimators=n_estimators_,
+            criterion=criterion_, 
+            max_depth=max_depth_, 
+            min_samples_split=min_samples_split_,
+            min_samples_leaf=min_samples_leaf_,
+            random_state=random_state_
+
+            )
+        clf_model.fit(X_train, Y_train)
+        pred_train = clf_model.predict(X_train)
+        st.write(clf_model.score(X_train, Y_train))
+        pred_test = clf_model.predict(X_test)
+        st.write(clf_model.score(X_test, Y_test))
+        test_conf = confusion_matrix(Y_test, pred_test)
+        test_conf
+        df = pd.DataFrame(test_conf)
+        csv = convert_df(df)
+        st.download_button(
+        label="Download data",
+        data=csv,
+        file_name=name + ".csv",
+        mime="text/csv",
+        )
+        clf.best_params_
+
+        # fig = tr.importance(clf_model, features)
+        # st.pyplot(fig)
         
+
+with tab3:
+    if method == "SVM":
+        C_value = st.sidebar.slider('C', 1, 100, (1, 50))
+        gamma = st.sidebar.slider('gamma', 0.0001, 1, (0.001, 0.1))
+        params = {
+            "C":[i for i in range(C_value[0], C_value[1])],
+            "gamma":[i for i in range(gamma[0], gamma[1])]
+            }
+    # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
+    st.header("SVM")
+
+    if st.button("SVCモデル構築"):
+        # name = uploaded_file.split(".")[0]
+        X, Y, features = tr.dataset(df, target, removal_feature)
+        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
+        clf = tr.grid_search(SVC(), X_train, Y_train, params)
+        C_ = clf.best_params_["C"]
+        gamma_ = clf.best_params_["gamma"] 
+        clf_model = SVC(
+            C=C_,
+            gamma=gamma_, 
+            )
+        clf_model.fit(X_train, Y_train)
+        pred_train = clf_model.predict(X_train)
+        st.write(clf_model.score(X_train, Y_train))
+        pred_test = clf_model.predict(X_test)
+        st.write(clf_model.score(X_test, Y_test))
+        test_conf = confusion_matrix(Y_test, pred_test)
+        test_conf
+        df = pd.DataFrame(test_conf)
+        csv = convert_df(df)
+        st.download_button(
+        label="Download data",
+        data=csv,
+        file_name=name + ".csv",
+        mime="text/csv",
+        )
+        clf.best_params_
+
+        # fig = tr.importance(clf_model, features)
+        # st.pyplot(fig)
