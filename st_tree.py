@@ -178,7 +178,7 @@ with tab3:
     # param_edit = st.sidebar.checkbox("ハイパーパラメータの設定", False)
     st.header("SVM")
 
-    if st.button("モデル構築"):
+    if st.button("SVCモデル構築"):
         # name = uploaded_file.split(".")[0]
         X, Y, features = tr.dataset(df, target, removal_feature)
         X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
