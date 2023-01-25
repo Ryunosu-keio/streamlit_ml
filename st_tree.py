@@ -18,15 +18,32 @@ from sklearn.svm import SVC
 
 st.title("機械学習")
 
-uploaded_file = st.file_uploader("Choose a CSV file", accept_multiple_files=False)
-if uploaded_file :
-    # df2 = pd.read_csv(uploaded_file)
-    # df2
-    df = pd.read_csv(uploaded_file)
-    features = df.columns
-    target = st.selectbox("目的変数を選択してください", features)
-    removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
-    name = st.text_input("ファイル名を入力してください")
+mode = st.radio(
+    "訓練データとテストデータの決め方",
+    ('ランダム', '自分で決める'))
+
+if mode == 'ランダム':
+    uploaded_file = st.file_uploader("Choose a CSV file", accept_multiple_files=False)
+    if uploaded_file :
+        # df2 = pd.read_csv(uploaded_file)
+        # df2
+        df = pd.read_csv(uploaded_file)
+        features = df.columns
+        target = st.selectbox("目的変数を選択してください", features)
+        removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
+        name = st.text_input("ファイル名を入力してください")
+else:
+    uploaded_file_train = st.file_uploader("Choose a CSV file for train", accept_multiple_files=False)
+    uploaded_file_test = st.file_uploader("Choose a CSV file for test", accept_multiple_files=False)
+    if uploaded_file_train and uploaded_file_test :
+        # df2 = pd.read_csv(uploaded_file)
+        # df2
+        train_df = pd.read_csv(uploaded_file_train)
+        test_df = pd.read_csv(uploaded_file_test)
+        features = train_df.columns
+        target = st.selectbox("目的変数を選択してください", features)
+        removal_feature = st.multiselect("説明変数として使わない変数を選択してください", features)
+        name = st.text_input("出力ファイル名を入力してください")
 
 tab1, tab2, tab3, tab4 = st.tabs(["決定木", "ランダムフォレスト", "SVM", "NN"])
 
@@ -47,7 +64,7 @@ with tab1:
         depth = st.sidebar.slider('max_depth', 1, 10, (2, 4))
         min_split = st.sidebar.slider('min_sample_split', 1, 10, (2, 3))
         leaf = st.sidebar.slider('min_sample_leaf', 1, 10, (1, 2))
-        random_state = st.sidebar.slider('random_state', 0, 30, (0, 3))
+        random_state = st.sidebar.slider('random_state', 0, 100, (0, 3))
         params = {
             "criterion":["gini", "entropy"],
             # "splitter":"best",
@@ -65,8 +82,12 @@ with tab1:
     # file1 = st.checkbox("ファイルをアップロード",False)
     if st.button("決定木モデル構築"):
         # name = uploaded_file.split(".")[0]
-        X, Y, features = tr.dataset(df, target, removal_feature)
-        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
+        if mode == "ランダム":
+            X, Y, features = tr.dataset(df, target, removal_feature)
+            X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
+        else :
+            X_train, Y_train, features = tr.dataset(train_df, target, removal_feature)
+            X_test, Y_test, features = tr.dataset(test_df, target, removal_feature)
         clf = tr.grid_search(DTC(), X_train, Y_train, params)
         max_depth_ = clf.best_params_["max_depth"]
         criterion_ = clf.best_params_["criterion"]
