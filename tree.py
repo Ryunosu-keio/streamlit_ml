@@ -1,148 +1,100 @@
-from sklearn.datasets import make_moons
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.tree import export_graphviz
-from matplotlib.colors import ListedColormap
-import graphviz
-from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
-import pandas as pd 
-import matplotlib.pyplot as plt
+from sklearn.model_selection import GridSearchCV
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, export_graphviz
+from sklearn.metrics import confusion_matrix, accuracy_score, mean_squared_error, mean_absolute_error
+from sklearn.base import BaseEstimator
+import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import graphviz
 import streamlit as st
 
-
-# features = ["section","online", "back car", "small car", 
-#             "big car add", "same car add", "num of add alart",
-#             "flame size", "adjacent car", "front adjacent", "rear adjacent"]
-
-# params = {
-#         "criterion":["gini", "entropy"],
-#         # "splitter":"best",
-#         "max_depth":[i for i in range(1, 5)],
-#         "min_samples_split":[i for i in range(2, 5)],
-#         "min_samples_leaf":[i for i in range(1, 10)],
-#         # "min_weight_fraction_leaf":0.0,
-#         # "max_features":4,
-#         "random_state":[i for i in range(0, 30)],
-#         # "max_leaf_nodes":8,
-#         # "class_weight":"balanced"
-#         }
-params = {
-        "criterion":["gini", "entropy"],
-        # "splitter":"best",
-        "max_depth":[i for i in range(2, 3)],
-        "min_samples_split":[i for i in range(2, 3)],
-        "min_samples_leaf":[i for i in range(1, 2)],
-        # "min_weight_fraction_leaf":0.0,
-        # "max_features":4,
-        "random_state":[i for i in range(0, 1)],
-        # "max_leaf_nodes":8,
-        # "class_weight":"balanced"
-        }
-
-@st.cache
+@st.cache_data
 def dataset(df, target, removal): 
-    X = df.drop(target,axis=1) #説明変数だけ
-    for i in range(len(removal)):
-        X = X.drop(removal[i], axis=1)
-    Y = df[target] #目的変数
-    features = X.columns #特徴量の名前
+    X = df.drop(target, axis=1)
+    for col in removal:
+        X = X.drop(col, axis=1)
+    Y = df[target]
+    features = X.columns
     return X, Y, features
 
-# plt.figure(figsize=(12, 8))
-# mglearn.discrete_scatter(X[:, 0], X[:, 1], Y)
-# plt.show()
-
-# def model_val(X_train, Y_train):
-#     clf_model = DecisionTreeClassifier(max_depth=3)
-#     clf_model.fit(X_train, Y_train)
-#     return clf_model
-
-def visualize(clf_model, features): #枝分かれの可視化図
-    dot_data = export_graphviz(clf_model, feature_names=features, class_names=["0","1","2","3","4","5"]) 
-    graph = graphviz.Source(dot_data)
-    return dot_data
-    # graph.render("output/" + name, format='png')
-
-@st.cache
-def grid_search(model, train_X, train_Y, params):
-    clf = GridSearchCV(model,   # グリッドサーチで決定木を定義
-                   params, cv=5)
+@st.cache_data(hash_funcs={BaseEstimator: lambda _: None})
+def grid_search(_model: BaseEstimator, train_X, train_Y, params):
+    clf = GridSearchCV(_model, params, cv=5)
     clf.fit(train_X, train_Y)
     return clf
 
-# def importance_viz(clf):
-#     feature = clf.feature_importances_
-#     label = features
-#     indices = np.argsort(feature)
-
-#     # 特徴量の重要度の棒グラフ
-#     fig =plt.figure (figsize = (10,10))
-
-#     plt.barh(range(len(feature)), feature[indices])
-
-#     plt.yticks(range(len(feature)), label, fontsize=14)
-#     plt.xticks(fontsize=14)
-#     plt.ylabel("Feature", fontsize=18)
-#     plt.xlabel("Feature Importance", fontsize=18)
+def visualize(clf_model, features):
+    # 回帰モデルは class_names を指定できないため表示制限
+    if isinstance(clf_model, DecisionTreeRegressor):
+        return "回帰モデルはグラフ可視化に対応していません。"
+    else:
+        class_names = [str(i) for i in np.unique(clf_model.classes_)]
+        dot_data = export_graphviz(clf_model, feature_names=features,
+                                   class_names=class_names,
+                                   filled=True, rounded=True,
+                                   special_characters=True)
+        return graphviz.Source(dot_data)
 
 def importance(clf_model, features):
-    f_importance = np.array(clf_model.feature_importances_) # 特徴量重要度の算出
-    f_importance = f_importance / np.sum(f_importance)  # 正規化(必要ない場合はコメントアウト)
-    df_importance = pd.DataFrame({'feature':features, 'importance':f_importance})
-    df_importance = df_importance.sort_values('importance', ascending=False) # 降順ソート
+    f_importance = np.array(clf_model.feature_importances_)
+    f_importance = f_importance / np.sum(f_importance)
+    df_importance = pd.DataFrame({'feature': features, 'importance': f_importance})
+    df_importance = df_importance.sort_values('importance', ascending=False)
     fig = plot_feature_importance(df_importance)
     return fig
 
-def plot_feature_importance(df): 
-    fig = plt.figure()
-    n_features = len(df)                              # 特徴量数(説明変数の個数) 
-    df_plot = df.sort_values('importance')            # df_importanceをプロット用に特徴量重要度を昇順ソート 
-    f_importance_plot = df_plot['importance'].values  # 特徴量重要度の取得 
-    plt.barh(range(n_features), f_importance_plot, align='center') 
-    cols_plot = df_plot['feature'].values             # 特徴量の取得 
-    plt.yticks(np.arange(n_features), cols_plot)      # x軸,y軸の値の設定
-    plt.xlabel('Feature importance')                  # x軸のタイトル
-    plt.ylabel('Feature')  
-    # plt.savefig("importance.png")
+
+def plot_feature_importance(df, top_n=10): 
+    # 上位 top_n 件を取得
+    df_top = df.nlargest(top_n, 'importance')
+    n_features = len(df_top)
+    fig_height = max(1, n_features * 0.5)
+    fig = plt.figure(figsize=(10, fig_height))
+
+    # 小さい順に並べ替えて水平棒グラフ
+    df_plot = df_top.sort_values('importance')
+    plt.barh(range(n_features), df_plot['importance'].values, align='center')
+    plt.yticks(np.arange(n_features), df_plot['feature'].values, fontsize=12)
+    plt.xticks(fontsize=12)
+    plt.xlabel('Feature importance', fontsize=14)
+    plt.ylabel('Feature', fontsize=14)
+    plt.tight_layout()
+
     return fig
 
+
+# テスト実行時
 if __name__ == "__main__":
-    path = "Sec2_riku.csv"
-    target = "Action"
-    name = path.split(".")[0]
-    X, Y, features = dataset(path, target)
+    from sklearn.datasets import load_diabetes
+    from sklearn.model_selection import train_test_split
+
+    data = load_diabetes()
+    df = pd.DataFrame(data.data, columns=data.feature_names)
+    df['target'] = data.target
+
+    X, Y, features = dataset(df, 'target', [])
     X_train, X_test, Y_train, Y_test = train_test_split(X, Y, random_state=0)
-    clf = grid_search(X_train, Y_train)
-    max_depth_ = clf.best_params_["max_depth"]
-    criterion_ = clf.best_params_["criterion"]
-    min_samples_split_ = clf.best_params_["min_samples_split"]
-    min_samples_leaf_ = clf.best_params_["min_samples_leaf"]
-    random_state_ = clf.best_params_["random_state"]
-    clf_model = DecisionTreeClassifier(
-        criterion=criterion_, 
-        max_depth=max_depth_, 
-        min_samples_split=min_samples_split_,
-        min_samples_leaf=min_samples_leaf_,
-        random_state=random_state_
-        )
+
+    model = DecisionTreeRegressor()
+    params = {
+        "max_depth": [2, 3, 4],
+        "min_samples_split": [2],
+        "min_samples_leaf": [1],
+        "random_state": [0]
+    }
+
+    clf = grid_search(model, X_train, Y_train, params)
+    clf_model = model.set_params(**clf.best_params_)
     clf_model.fit(X_train, Y_train)
-    pred_train = clf_model.predict(X_train)
-    print(len(X_train))
-    print(len(Y_train))
-    print(clf_model.score(X_train, Y_train))
-    pred_test = clf_model.predict(X_test)
-    print(clf_model.score(X_test, Y_test))
-    test_conf = confusion_matrix(Y_test, pred_test)
-    print(test_conf)
-    print(clf.best_params_)
-    visualize(clf_model, features, name)
+    pred = clf_model.predict(X_test)
 
+    # 回帰用スコア出力
+    rmse = mean_squared_error(Y_test, pred) ** 0.5
+    mae = mean_absolute_error(Y_test, pred)
+    print("RMSE:", rmse)
+    print("MAE:", mae)
 
-    f_importance = np.array(clf_model.feature_importances_) # 特徴量重要度の算出
-    f_importance = f_importance / np.sum(f_importance)  # 正規化(必要ない場合はコメントアウト)
-    df_importance = pd.DataFrame({'feature':features, 'importance':f_importance})
-    df_importance = df_importance.sort_values('importance', ascending=False) # 降順ソート
-    print(df_importance)
-    plot_feature_importance(df_importance)
-
+    print("特徴量重要度：")
+    f_importance = clf_model.feature_importances_
+    for f, v in zip(features, f_importance):
+        print(f"{f}: {v:.4f}")
