@@ -1,0 +1,17 @@
+{
+  "input": "../data/final_2025_dark_notadjusted/darkfinal_104to114_diff_domain.xlsx",
+  "out_root": "./runs_domain",
+  "task": "regression",
+  "target_col": "diopter_centered",
+  "class_source": "diopter_centered",
+  "pos_threshold": 0.0,
+  "clf_threshold": 0.5,
+  "include_center_center": false,
+  "test_size": 0.2,
+  "cv": 5,
+  "n_estimators": 300,
+  "max_depth": 5,
+  "learning_rate": 0.1,
+  "subsample": 0.9,
+  "colsample_bytree": 0.9
+}
