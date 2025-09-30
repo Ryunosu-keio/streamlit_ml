@@ -158,7 +158,7 @@ def _compute_shap_values(_model, X_bg: pd.DataFrame, X_te: pd.DataFrame, task_ty
     # 背景要約
     masker = _summarize_background(X_bg)
 
-    # モデル別に Explainer
+    # --- 木系モデル ---
     if _is_tree_classifier(_model):
         explainer = shap.TreeExplainer(
             _model,
@@ -166,7 +166,11 @@ def _compute_shap_values(_model, X_bg: pd.DataFrame, X_te: pd.DataFrame, task_ty
             model_output="probability",
             feature_perturbation="interventional",
         )
-        sv = explainer(X_te, check_additivity=False)
+        # TreeExplainer のときだけ check_additivity を渡す
+        try:
+            sv = explainer(X_te, check_additivity=False)
+        except TypeError:
+            sv = explainer(X_te)
 
     elif _is_tree_regressor(_model):
         explainer = shap.TreeExplainer(
@@ -174,10 +178,14 @@ def _compute_shap_values(_model, X_bg: pd.DataFrame, X_te: pd.DataFrame, task_ty
             data=masker,
             feature_perturbation="interventional",
         )
-        sv = explainer(X_te, check_additivity=False)
+        try:
+            sv = explainer(X_te, check_additivity=False)
+        except TypeError:
+            sv = explainer(X_te)
 
+    # --- 非木系モデル ---
     else:
-        # 非木系: DataFrameを渡すpredict_fnでラップ
+        # predict or predict_proba を DataFrame にラップ
         if hasattr(_model, "predict_proba") and task_type == "分類":
             def f(a):
                 df = pd.DataFrame(a, columns=columns)
@@ -188,9 +196,10 @@ def _compute_shap_values(_model, X_bg: pd.DataFrame, X_te: pd.DataFrame, task_ty
                 return _model.predict(df)
 
         explainer = shap.Explainer(f, masker)
-        sv = explainer(X_te, check_additivity=False)
+        # PermutationExplainer には check_additivity がない
+        sv = explainer(X_te)
 
-    # feature_names補完
+    # feature_names 補完
     if not hasattr(sv, "feature_names") or sv.feature_names is None:
         sv.feature_names = list(columns)
 
