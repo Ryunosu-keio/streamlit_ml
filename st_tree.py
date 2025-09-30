@@ -14,9 +14,11 @@ from sklearn.utils import resample
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier, XGBRegressor
 import pandas as pd
 import numpy as np
 import warnings
+
 import matplotlib.pyplot as plt
 import xai as xai
 
@@ -62,7 +64,7 @@ else:
         removal = st.multiselect("説明変数から除外する列", features_all, default=[group_col])
         name = st.text_input("実験名（任意）")
 
-ml_type = st.sidebar.selectbox("モデル", ["DecisionTree", "RandomForest", "SVM", "NN"])
+ml_type = st.sidebar.selectbox("モデル", ["DecisionTree", "RandomForest", "SVM", "NN", "XGBoost"])
 task_type = st.sidebar.radio("タスク", ["分類", "回帰"])
 
 # 分類タスクなら、連続目的変数の分位ラベリングオプション
@@ -100,6 +102,20 @@ elif ml_type == "NN":
     alpha    = st.sidebar.select_slider("L2(alpha)", options=[1e-5, 1e-4, 1e-3, 1e-2], value=1e-4)
     hidden   = tuple([size] * n_layers)
     params = {"hidden_layer_sizes": [hidden], "alpha": [alpha]}
+
+elif ml_type == "XGBoost":
+    lr = st.sidebar.slider("learning_rate", 0.01, 0.5, (0.05, 0.2))
+    depth = st.sidebar.slider("max_depth", 2, 15, (3, 8))
+    estimators = st.sidebar.slider("n_estimators", 50, 500, (100, 300))
+    subsample = st.sidebar.slider("subsample", 0.5, 1.0, (0.8, 1.0))
+    colsample = st.sidebar.slider("colsample_bytree", 0.5, 1.0, (0.8, 1.0))
+    params = {
+        "learning_rate": [round(v, 3) for v in np.linspace(lr[0], lr[1], 3)],
+        "max_depth": list(range(depth[0], depth[1] + 1, 2)),
+        "n_estimators": list(range(estimators[0], estimators[1] + 1, 50)),
+        "subsample": [round(v, 2) for v in np.linspace(subsample[0], subsample[1], 3)],
+        "colsample_bytree": [round(v, 2) for v in np.linspace(colsample[0], colsample[1], 3)],
+    }
 
 # 分類のみ：オーバーサンプリング
 oversample_option = None
@@ -151,6 +167,9 @@ if st.button("クロスバリデーション実行"):
         model = SVC(probability=True, random_state=random_state) if task_type == "分類" else SVR()
     elif ml_type == "NN":
         model = MLPClassifier(max_iter=1000, random_state=random_state) if task_type == "分類" else MLPRegressor(max_iter=1000, random_state=random_state)
+
+    elif ml_type == "XGBoost":
+        model = XGBClassifier(eval_metric="mlogloss", random_state=random_state) if task_type == "分類" else XGBRegressor(random_state=random_state)
 
     # elif ml_type == "SVM":
     #     st.write("SVMは標準化を強く推奨します。")
@@ -471,3 +490,7 @@ if st.session_state.get("cv_ready", False) and st.session_state.get("cv_payload"
     xai.explain_lime(mdl_b, X_bg, X_te, task_type)
 else:
     st.info("上の『クロスバリデーション実行』でモデルを作成すると、ここにXAIが表示されます。")
+
+
+    #パスが通ってないのでこれでやる　
+    # python -m streamlit run st_tree.py
