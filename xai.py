@@ -22,7 +22,7 @@ def _is_tree_regressor(m):
     return isinstance(m, (RandomForestRegressor, DecisionTreeRegressor, XGBRegressor))
 
 def _align_df(df: pd.DataFrame, columns):
-    """列順と dtype を揃える"""
+    """列順と dtype を揃える（常にコピーを返す）"""
     df = df.copy()
     for c in columns:
         if c not in df.columns:
@@ -79,6 +79,7 @@ def _compute_shap_values(_model, X_bg: pd.DataFrame, X_te: pd.DataFrame, task_ty
     """
     model = _model
 
+    # 必ずここでコピー & 整形（元データは触らない）
     X_bg = _align_df(X_bg, columns)
     X_te = _align_df(X_te, columns)
 
@@ -139,9 +140,17 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
         st.info("SHAP: データが空です。")
         return
 
+    # ★ ここで必ずコピーを取る（cv 側の X を絶対に壊さない）
+    X_train = X_train.copy()
+    X_test = X_test.copy()
+
     columns = list(X_train.columns.astype(str))
-    X_bg = X_train[columns]
-    X_te = X_test[columns]
+    X_train.columns = columns
+    X_test.columns = columns
+
+    # 以降はコピーのみを使う
+    X_bg = X_train[columns].copy()
+    X_te = X_test[columns].copy()
 
     # ---- SHAP 計算 ----
     sv = _compute_shap_values(model, X_bg, X_te, task_type, columns)
@@ -173,16 +182,14 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
 
     try:
         fig2, ax2 = plt.subplots(figsize=(8, 5))
-        shap.summary_plot(sv_plot, X_te, show=False)
+        # X_te は必ずコピーを渡す
+        shap.summary_plot(sv_plot, X_te.copy(), show=False)
         st.pyplot(fig2)
         plt.close(fig2)
     except Exception as e:
         st.warning(f"dot summary failed: {e}")
 
-    # ============================================================
-    # ② Dependence plot は削除（なし）
-    # ============================================================
-
+    
     # ============================================================
     # ③ Interaction values（交互作用）
     # ============================================================
@@ -192,54 +199,63 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
 
     if _is_tree_classifier(model) or _is_tree_regressor(model):
         try:
-            explainer_int = shap.TreeExplainer(model)
+            # ---- ここでは X_train を使う：必ず 2D DataFrame のはず ----
+            X_int_df = X_train.copy()
 
-            # 必ず 2D ndarray に変換
-            X_int_df = _align_df(_ensure_2d(X_te), columns)
+            # 列名を統一（念のため）
+            X_int_df.columns = columns
 
-            # 計算コスト削減したければサンプリング
+            # 計算コスト削減のサンプリング
             max_samples_for_inter = 300
             if len(X_int_df) > max_samples_for_inter:
                 X_int_df = X_int_df.sample(max_samples_for_inter, random_state=0)
 
-            if isinstance(X_int_df, pd.DataFrame):
-                X_int = X_int_df.values
-            else:
-                X_int = np.asarray(X_int_df, dtype=float)
+            # 必ず float の 2D ndarray に変換
+            X_int = np.asarray(X_int_df, dtype=float)
 
+            # 念のため 1D なら reshape（ここで 2D を強制）
             if X_int.ndim == 1:
                 X_int = X_int.reshape(1, -1)
 
-            inter_vals = explainer_int.shap_interaction_values(X_int)
-
-            if isinstance(inter_vals, list):
-                # 多クラス → クラスごとの行列を絶対値平均
-                mats = [np.abs(v).mean(axis=0) for v in inter_vals]
-                inter_mat = np.mean(mats, axis=0)
+            # ここでまだ 2D じゃなかったら諦めてログ出す
+            if X_int.ndim != 2:
+                st.warning(f"X_int が 2D ではありません: ndim={X_int.ndim}, shape={X_int.shape}")
+                st.info("交互作用 SHAP をスキップしました。")
             else:
-                inter_mat = np.abs(inter_vals).mean(axis=0)
+                # ★ 相互作用用の TreeExplainer は raw 出力 & tree_path_dependent（デフォルト）
+                explainer_int = shap.TreeExplainer(model)
 
-            # 上三角だけ → ペアに変換
-            tri = np.triu_indices_from(inter_mat, k=1)
-            pairs = [
-                (columns[i], columns[j], float(inter_mat[i, j]))
-                for i, j in zip(tri[0], tri[1])
-            ]
-            inter_df = pd.DataFrame(pairs, columns=["feat1", "feat2", "interaction"])
-            inter_df = inter_df.sort_values("interaction", ascending=False)
+                inter_vals = explainer_int.shap_interaction_values(X_int)
 
-            if len(inter_df) > 0:
-                st.dataframe(inter_df.head(20))
-                st.success(
-                    f"最大交互作用：{inter_df.iloc[0]['feat1']} × {inter_df.iloc[0]['feat2']}"
-                )
-            else:
-                st.info("交互作用が計算できませんでした。")
+                # 多クラスなら list で返るので、クラスごとに平均
+                if isinstance(inter_vals, list):
+                    mats = [np.abs(v).mean(axis=0) for v in inter_vals]
+                    inter_mat = np.mean(mats, axis=0)
+                else:
+                    inter_mat = np.abs(inter_vals).mean(axis=0)
+
+                # 上三角だけ取り出してペアに変換
+                tri = np.triu_indices_from(inter_mat, k=1)
+                pairs = [
+                    (columns[i], columns[j], float(inter_mat[i, j]))
+                    for i, j in zip(tri[0], tri[1])
+                ]
+                inter_df = pd.DataFrame(pairs, columns=["feat1", "feat2", "interaction"])
+                inter_df = inter_df.sort_values("interaction", ascending=False)
+
+                if len(inter_df) > 0:
+                    st.dataframe(inter_df.head(20))
+                    st.success(
+                        f"最大交互作用：{inter_df.iloc[0]['feat1']} × {inter_df.iloc[0]['feat2']}"
+                    )
+                else:
+                    st.info("交互作用が計算できませんでした。")
 
         except Exception as e:
             st.warning(f"interaction SHAP failed: {e}")
     else:
         st.info("交互作用 SHAP は Tree 系モデルのみ対応しています。")
+
     # ============================================================
     # ④ Interaction dependence plot（2変数の関係）
     # ============================================================
@@ -256,7 +272,7 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
         try:
             if feat2_choice == "選ばない":
                 # ---- 単色散布図（交互作用なし・純粋な単変量形）----
-                X2 = _ensure_2d(X_te)
+                X2 = _ensure_2d(X_te.copy())
                 x = X2[f1].values
                 feat_idx = columns.index(f1)
                 y = sv_plot.values[:, feat_idx]
@@ -295,7 +311,7 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
                 shap.dependence_plot(
                     f1,
                     sv_plot.values,
-                    _ensure_2d(X_te),
+                    _ensure_2d(X_te.copy()),
                     interaction_index=interaction_index,
                     feature_names=columns,
                     ax=ax4,
@@ -306,7 +322,6 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
 
         except Exception as e:
             st.warning(f"interaction dependence plot failed: {e}")
-
 
     # ============================================================
     # ⑤ Local waterfall
@@ -332,6 +347,115 @@ def explain_shap(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
             plt.close(fig5)
         except Exception as e:
             st.warning(f"waterfall failed: {e}")
+    #=====================
+    # Decision plot（Tree 系のみ）
+    #=====================
+    if _is_tree_classifier(model) or _is_tree_regressor(model):
+        st.subheader("Decision plot（Tree 系モデルのみ）")
+
+        try:
+            idxs = st.multiselect(
+                "インデックス（複数選択可）",
+                list(range(len(X_te))),
+                default=[0]
+            )
+
+            if len(idxs) > 0:
+                fig6 = plt.figure(figsize=(8, 5))
+
+                # ---- base_value を「スカラー」にするのがポイント ----
+                base_vals = sv_plot.base_values
+                if np.ndim(base_vals) == 0:
+                    base = float(base_vals)
+                else:
+                    base = float(np.mean(base_vals))
+
+                shap.decision_plot(
+                    base,
+                    sv_plot.values[idxs],
+                    features=X_te.iloc[idxs],
+                    feature_names=columns,
+                    show=False,
+                )
+
+                st.pyplot(fig6)
+                plt.close(fig6)
+
+        except Exception as e:
+            st.warning(f"decision plot failed: {e}")
+
+    # ============================================================
+    # ⑥ SHAP 付き Train/Test データを Excel ダウンロード
+    # ============================================================
+    st.subheader("SHAP 付きデータのダウンロード")
+
+    try:
+        import io
+
+        # ---- ここまでで決まっている情報 ----
+        # sv_plot:   X_te（テスト）の SHAP（必ず 2D: (n_test, n_feat)）
+        # X_bg:      X_train のコピー
+        # X_te:      X_test のコピー
+        # columns:   特徴量名
+
+        # ------------------------------
+        # 1) Test 用（既に sv_plot がある）
+        # ------------------------------
+        shap_test_vals = sv_plot.values          # (n_test, n_features)
+        shap_cols = [f"shap_{c}" for c in columns]
+
+        df_test_out = X_te.copy()
+        df_test_out.reset_index(drop=True, inplace=True)
+        df_shap_test = pd.DataFrame(shap_test_vals, columns=shap_cols)
+        df_test_out = pd.concat([df_test_out, df_shap_test], axis=1)
+
+        # ------------------------------
+        # 2) Train 用 SHAP を新たに計算
+        #    （多クラスなら test と同じクラスを切り出す）
+        # ------------------------------
+        sv_train = _compute_shap_values(model, X_bg, X_bg, task_type, columns)
+
+        # test 側で多クラスの slice をしたかどうか
+        used_multiclass_slice = (sv.values.ndim == 3 and sv_plot.values.ndim == 2)
+
+        if used_multiclass_slice and sv_train.values.ndim == 3:
+            # 上のブロックで out_idx を選んでいたので、それをそのまま使う
+            # （out_idx は out_dim > 1 のときしか使われない）
+            sv_train_plot = _slice_output_to_single(sv_train, out_idx)
+        else:
+            sv_train_plot = sv_train
+
+        shap_train_vals = sv_train_plot.values   # (n_train, n_features)
+
+        df_train_out = X_bg.copy()
+        df_train_out.reset_index(drop=True, inplace=True)
+        df_shap_train = pd.DataFrame(shap_train_vals, columns=shap_cols)
+        df_train_out = pd.concat([df_train_out, df_shap_train], axis=1)
+
+        # ------------------------------
+        # 3) Excel に書き出して download_button
+        # ------------------------------
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df_train_out.to_excel(writer, index=False, sheet_name="train")
+            df_test_out.to_excel(writer, index=False, sheet_name="test")
+        output.seek(0)
+
+        st.download_button(
+            label="SHAP 付き Train/Test Excel をダウンロード",
+            data=output,
+            file_name="shap_train_test.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    except Exception as e:
+        # ここで例外を画面に出してくれるので、subheader 以降が消える問題が分かりやすくなる
+        st.error("SHAP 付きデータの作成中にエラーが発生しました。")
+        st.exception(e)
+
+
+
+
 
 
 # ============================================================
@@ -355,11 +479,15 @@ def explain_lime(model, X_train: pd.DataFrame, X_test: pd.DataFrame, task_type: 
         st.info("LIME: データが空です。")
         return
 
+    # ★ ここも念のためコピーしておく
+    X_train = X_train.copy()
+    X_test = X_test.copy()
+
     feature_names = X_train.columns.tolist()
     class_names = model.classes_.tolist() if task_type == "分類" and hasattr(model, "classes_") else None
     mode = "classification" if task_type == "分類" else "regression"
 
-    explainer = _lime_explainer(X_train.values, feature_names, class_names, mode)
+    explainer = _lime_explainer(X_train.values.copy(), feature_names, class_names, mode)
 
     idx = st.slider("LIME インデックス", 0, len(X_test) - 1, 0)
     predict_fn = model.predict_proba if task_type == "分類" and hasattr(model, "predict_proba") \

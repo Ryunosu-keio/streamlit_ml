@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 from sklearn.model_selection import train_test_split, GroupShuffleSplit
-from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     r2_score, mean_squared_error, mean_absolute_error,
@@ -95,30 +95,6 @@ def bin_target_if_needed(y, n_bins=None):
     return y_bins
 
 
-def coef_table_from_lasso_poly(pipe, feature_cols, task_type):
-    """
-    Pipeline(poly + scaler + Lasso または LogisticRegression) から
-    多項式項の係数表を作る。
-    """
-    poly = pipe.named_steps["poly"]
-    if task_type == "回帰":
-        reg = pipe.named_steps["model"]
-        coefs = reg.coef_
-        intercept = reg.intercept_
-    else:
-        # 2 クラス想定
-        clf = pipe.named_steps["model"]
-        coefs = clf.coef_[0]
-        intercept = clf.intercept_[0]
-
-    names = poly.get_feature_names_out(feature_cols)
-    df = pd.DataFrame(
-        {"term": names, "coef": coefs}
-    ).sort_values("coef", key=np.abs, ascending=False)
-
-    return df, intercept
-
-
 def stepwise_aic_ols(X, y, max_steps=50, verbose=False):
     """
     前進ステップワイズ AIC 最小化（回帰：OLS）。
@@ -192,6 +168,74 @@ def stepwise_aic_logit(X, y, max_steps=50, verbose=False):
     return best_model, selected
 
 
+def build_poly_design_matrix(
+    X_tr, X_te, feature_cols, poly_mode, selected_interactions=None
+):
+    """
+    poly_mode に応じて設計行列を作る。
+    - 一次のみ: 元の説明変数そのまま
+    - 一次＋交互作用のみ: 1次 + 選択された交互作用
+    - ２次のみ: 各変数の 2 乗項のみ
+    - ２次＋交互作用のみ: 2乗項 + 選択された交互作用
+    selected_interactions: ["x1 * x2", ...] のリスト
+    """
+    if selected_interactions is None:
+        selected_interactions = []
+
+    # 1次のみはそのまま返す
+    if poly_mode == "一次のみ":
+        X_tr_design = X_tr.copy()
+        X_te_design = X_te.copy()
+        design_cols = list(X_tr_design.columns)
+        return X_tr_design, X_te_design, design_cols
+
+    # それ以外は 2次までの多項式を作ってからフィルタ
+    poly = PolynomialFeatures(
+        degree=2, include_bias=False, interaction_only=False
+    )
+    X_tr_poly = poly.fit_transform(X_tr)
+    X_te_poly = poly.transform(X_te)
+    names = poly.get_feature_names_out(feature_cols)
+    X_tr_poly_df = pd.DataFrame(X_tr_poly, columns=names, index=X_tr.index)
+    X_te_poly_df = pd.DataFrame(X_te_poly, columns=names, index=X_te.index)
+
+    # 1次項・2乗項・交互作用項を分類
+    first_terms = [n for n in names if (n in feature_cols)]
+    square_terms = [n for n in names if "^2" in n and " " not in n]
+    interaction_terms_all = [n for n in names if " " in n and "^" not in n]
+
+    # ラベル "x1 * x2" と実際の項名 "x1 x2" の対応を作る
+    pair_label_to_term = {}
+    for t in interaction_terms_all:
+        a, b = t.split(" ")
+        label1 = f"{a} * {b}"
+        label2 = f"{b} * {a}"
+        pair_label_to_term[label1] = t
+        pair_label_to_term[label2] = t
+
+    chosen_interaction_terms = []
+    for lab in selected_interactions:
+        if lab in pair_label_to_term:
+            chosen_interaction_terms.append(pair_label_to_term[lab])
+
+    if poly_mode == "一次＋交互作用のみ":
+        keep_terms = first_terms + chosen_interaction_terms
+    elif poly_mode == "２次のみ":
+        keep_terms = square_terms
+    elif poly_mode == "２次＋交互作用のみ":
+        keep_terms = square_terms + chosen_interaction_terms
+    else:
+        # 万が一のフォールバック（全部）
+        keep_terms = list(names)
+
+    # 重複排除
+    keep_terms = list(dict.fromkeys(keep_terms))
+
+    X_tr_design = X_tr_poly_df[keep_terms]
+    X_te_design = X_te_poly_df[keep_terms]
+    return X_tr_design, X_te_design, keep_terms
+
+
 # ============================================================
 # Streamlit UI
 # ============================================================
@@ -225,8 +269,16 @@ st.sidebar.header("モデリング設定")
 task_type = st.sidebar.radio("タスク種別", ["回帰", "分類"])
 model_type = st.sidebar.selectbox("変数選択の方法", ["Lasso（正則化）", "AIC（ステップワイズ）","なし（全変数使用）"])
 
-deg = st.sidebar.slider("多項式の次数", 1, 3, 2)
-interaction_only = st.sidebar.checkbox("交互作用項のみ追加（同じ変数の2乗などは含めない）", value=False)
+poly_mode = st.sidebar.selectbox(
+    "多項式項の構成",
+    ["一次のみ", "一次＋交互作用のみ", "２次のみ", "２次＋交互作用のみ"]
+)
+
+standardize = st.sidebar.checkbox(
+    "説明変数を標準化する（平均0, 分散1）",
+    value=True
+)
+
 test_size = st.sidebar.slider("テストデータの割合（単一ファイル時）", 0.1, 0.5, 0.2)
 random_state = st.sidebar.number_input("random_state", 0, 9999, 42)
 
@@ -244,6 +296,7 @@ else:
 target = None
 feature_cols = []
 group_col = None
+selected_interactions = []
 
 if base_df is not None:
     st.markdown("---")
@@ -264,7 +317,7 @@ if base_df is not None:
     expl_candidates = [c for c in numeric_cols if c not in [target, group_col]]
 
     feature_cols = st.multiselect(
-        "多項式展開に使う説明変数（追加方式）",
+        "モデルに使う説明変数",
         expl_candidates,
         default=expl_candidates,
         key="feature_cols"
@@ -272,6 +325,16 @@ if base_df is not None:
 
     st.caption("※ 説明変数を 0 個にすると学習できません。")
 
+    # 交互作用を選ぶ UI（必要な場合のみ表示）
+    if feature_cols and poly_mode in ["一次＋交互作用のみ", "２次＋交互作用のみ"]:
+        from itertools import combinations
+        pair_labels = [f"{a} * {b}" for a, b in combinations(feature_cols, 2)]
+        selected_interactions = st.multiselect(
+            "追加する交互作用（ペア）",
+            pair_labels,
+            default=[],
+            help="一次＋交互作用のみ / ２次＋交互作用のみ のときに有効です。"
+        )
 
 # ============================================================
 # モデル学習・評価 実行
@@ -288,7 +351,7 @@ if run:
 
     # ---------- train / test 分割 ----------
     try:
-        X_tr, X_te, y_tr, y_te = make_train_test(
+        X_tr_raw, X_te_raw, y_tr, y_te = make_train_test(
             df if df is not None else train_df,
             None if df is not None else test_df,
             mode_flag,
@@ -315,6 +378,24 @@ if run:
             st.error(str(e))
             st.stop()
 
+    # ---------- 多項式設計行列の作成 ----------
+    try:
+        X_tr, X_te, design_cols = build_poly_design_matrix(
+            X_tr_raw, X_te_raw, feature_cols, poly_mode, selected_interactions
+        )
+    except Exception as e:
+        st.error(f"多項式特徴量の作成でエラー: {e}")
+        st.stop()
+
+    # statsmodels 用（AIC / 全項）に使う行列：必要ならここで標準化
+    X_tr_stats = X_tr.copy()
+    X_te_stats = X_te.copy()
+    if standardize:
+        mean = X_tr.mean()
+        std = X_tr.std(ddof=0).replace(0, 1)
+        X_tr_stats = (X_tr - mean) / std
+        X_te_stats = (X_te - mean) / std
+
     # ========================================================
     # Lasso（sklearn Pipeline）
     # ========================================================
@@ -322,27 +403,26 @@ if run:
         st.subheader("Lasso 多項式モデルの結果")
 
         if task_type == "回帰":
-            pipe = Pipeline([
-                ("poly", PolynomialFeatures(
-                    degree=deg, include_bias=False, interaction_only=interaction_only
-                )),
-                ("scaler", StandardScaler()),
-                ("model", LassoCV(cv=5, random_state=random_state))
-            ])
+            steps = []
+            if standardize:
+                steps.append(("scaler", StandardScaler()))
+            steps.append(("model", LassoCV(cv=5, random_state=random_state)))
+            pipe = Pipeline(steps)
         else:
-            pipe = Pipeline([
-                ("poly", PolynomialFeatures(
-                    degree=deg, include_bias=False, interaction_only=interaction_only
-                )),
-                ("scaler", StandardScaler()),
-                ("model", LogisticRegression(
+            steps = []
+            if standardize:
+                steps.append(("scaler", StandardScaler()))
+            steps.append((
+                "model",
+                LogisticRegression(
                     penalty="l1",
                     solver="saga",
                     max_iter=5000,
                     random_state=random_state,
                     class_weight="balanced"
-                ))
-            ])
+                )
+            ))
+            pipe = Pipeline(steps)
 
         pipe.fit(X_tr, y_tr)
 
@@ -374,7 +454,7 @@ if run:
             hi = max(y_tr.max(), y_te.max(), yhat_tr.max(), yhat_te.max())
             ax.plot([lo, hi], [lo, hi], "--")
             ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
-            ax.set_title("Actual vs Predicted (Lasso-Poly)")
+            ax.set_title(f"Actual vs Predicted (Lasso, {poly_mode})")
             ax.legend()
             st.pyplot(fig)
 
@@ -420,19 +500,26 @@ if run:
             st.dataframe(rep_df)
 
         # 係数表
-        coef_df, intercept = coef_table_from_lasso_poly(
-            pipe, feature_cols, task_type
-        )
-        st.subheader("多項式項の係数（Lasso により自動選択）")
+        st.subheader("係数（Lasso による自動選択）")
+        if task_type == "回帰":
+            model_l = pipe.named_steps["model"]
+            coefs = model_l.coef_
+            intercept = model_l.intercept_
+        else:
+            clf = pipe.named_steps["model"]
+            coefs = clf.coef_[0]
+            intercept = clf.intercept_[0]
+        coef_df = pd.DataFrame(
+            {"term": design_cols, "coef": coefs}
+        ).sort_values("coef", key=np.abs, ascending=False)
         st.write(f"切片（intercept）: {intercept:.4f}")
         st.dataframe(coef_df.head(50))
 
         # === XAI ===
-        st.subheader("XAI（SHAP / LIME：Lasso-Poly）")
+        st.subheader("XAI（SHAP / LIME：Lasso）")
         try:
-            # 背景は train のサンプル
             bg = X_tr if len(X_tr) <= 200 else X_tr.sample(200, random_state=42)
-            xai.explain_shap(pipe, bg, X_te, task_type, "Poly-Lasso")
+            xai.explain_shap(pipe, bg, X_te, task_type, f"Lasso-{poly_mode}")
             xai.explain_lime(pipe, bg, X_te, task_type)
         except Exception as e:
             st.info(f"XAI 計算でエラーが発生しました: {e}")
@@ -443,19 +530,8 @@ if run:
     elif model_type.startswith("AIC"):
         st.subheader("AIC ステップワイズ多項式モデルの結果")
 
-        # まず多項式特徴を明示的に作る
-        poly = PolynomialFeatures(
-            degree=deg, include_bias=False, interaction_only=interaction_only
-        )
-        X_tr_poly = poly.fit_transform(X_tr)
-        X_te_poly = poly.transform(X_te)
-        poly_names = poly.get_feature_names_out(feature_cols)
-
-        X_tr_poly_df = pd.DataFrame(X_tr_poly, columns=poly_names, index=X_tr.index)
-        X_te_poly_df = pd.DataFrame(X_te_poly, columns=poly_names, index=X_te.index)
-
         if task_type == "回帰":
-            model_aic, selected = stepwise_aic_ols(X_tr_poly_df, y_tr)
+            model_aic, selected = stepwise_aic_ols(X_tr_stats, y_tr)
             st.write(f"選択された項の数: {len(selected)}")
             st.write("選択された項（一部）：")
             st.write(selected[:30])
@@ -470,8 +546,8 @@ if run:
             st.dataframe(coef_df.head(50))
 
             # 予測と評価
-            X_tr_sel = sm.add_constant(X_tr_poly_df[selected])
-            X_te_sel = sm.add_constant(X_te_poly_df[selected], has_constant="add")
+            X_tr_sel = sm.add_constant(X_tr_stats[selected])
+            X_te_sel = sm.add_constant(X_te_stats[selected], has_constant="add")
             yhat_tr = model_aic.predict(X_tr_sel)
             yhat_te = model_aic.predict(X_te_sel)
 
@@ -498,7 +574,7 @@ if run:
             hi = max(y_tr.max(), y_te.max(), yhat_tr.max(), yhat_te.max())
             ax.plot([lo, hi], [lo, hi], "--")
             ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
-            ax.set_title("Actual vs Predicted (AIC-Poly)")
+            ax.set_title(f"Actual vs Predicted (AIC, {poly_mode})")
             ax.legend()
             st.pyplot(fig)
 
@@ -508,7 +584,7 @@ if run:
                 st.error("AIC ロジットは 2 クラス分類のみ対応です。目的変数を 0/1 の2値にしてください。")
                 st.stop()
 
-            model_aic, selected = stepwise_aic_logit(X_tr_poly_df, y_tr)
+            model_aic, selected = stepwise_aic_logit(X_tr_stats, y_tr)
             st.write(f"選択された項の数: {len(selected)}")
             st.write("選択された項（一部）：")
             st.write(selected[:30])
@@ -521,8 +597,8 @@ if run:
             st.subheader("係数・p値（AIC 選択後 Logit）")
             st.dataframe(coef_df.head(50))
 
-            X_tr_sel = sm.add_constant(X_tr_poly_df[selected])
-            X_te_sel = sm.add_constant(X_te_poly_df[selected], has_constant="add")
+            X_tr_sel = sm.add_constant(X_tr_stats[selected])
+            X_te_sel = sm.add_constant(X_te_stats[selected], has_constant="add")
             yhat_tr_prob = model_aic.predict(X_tr_sel)
             yhat_te_prob = model_aic.predict(X_te_sel)
 
@@ -561,32 +637,21 @@ if run:
             fig_cm.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
             st.pyplot(fig_cm)
 
-
         st.info("AIC モデルは statsmodels を使っているため、SHAP/LIME はここでは実行していません。")
+
     else:
-        # 全変数でそのまま
+        # 全変数でそのまま（AIC なし）
         st.write("全ての多項式項を使用します。")   
         st.subheader("全変数多項式モデルの結果")
 
-        # まず多項式特徴を明示的に作る
-        poly = PolynomialFeatures(
-            degree=deg, include_bias=False, interaction_only=interaction_only
-        )
-        X_tr_poly = poly.fit_transform(X_tr)
-        X_te_poly = poly.transform(X_te)
-        poly_names = poly.get_feature_names_out(feature_cols)
-
-        X_tr_poly_df = pd.DataFrame(X_tr_poly, columns=poly_names, index=X_tr.index)
-        X_te_poly_df = pd.DataFrame(X_te_poly, columns=poly_names, index=X_te.index)
-
         if task_type == "回帰":
             # ---- OLS を全項で当てる ----
-            X_tr_design = sm.add_constant(X_tr_poly_df)
-            X_te_design = sm.add_constant(X_te_poly_df, has_constant="add")
+            X_tr_design = sm.add_constant(X_tr_stats)
+            X_te_design = sm.add_constant(X_te_stats, has_constant="add")
 
             model = sm.OLS(y_tr, X_tr_design).fit()
 
-            st.write(f"使用した項の数: {len(poly_names)}")
+            st.write(f"使用した項の数: {X_tr_stats.shape[1]}")
 
             # 係数表
             params = model.params
@@ -624,7 +689,7 @@ if run:
             hi = max(y_tr.max(), y_te.max(), yhat_tr.max(), yhat_te.max())
             ax.plot([lo, hi], [lo, hi], "--")
             ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
-            ax.set_title("Actual vs Predicted (Full Poly OLS)")
+            ax.set_title(f"Actual vs Predicted (Full, {poly_mode})")
             ax.legend()
             st.pyplot(fig)
 
@@ -634,7 +699,54 @@ if run:
                 st.error("全変数ロジットは 2 クラス分類のみ対応です。目的変数を 0/1 の2値にしてください。")
                 st.stop()
 
-            X_tr_design = sm.add_constant(X_tr_poly_df)
-            X_te_design = sm.add_constant(X_te_poly_df, has_constant="add")
+            X_tr_design = sm.add_constant(X_tr_stats)
+            X_te_design = sm.add_constant(X_te_stats, has_constant="add")
 
-            model = sm.L
+            model = sm.Logit(y_tr, X_tr_design).fit(disp=0)
+
+            st.write(f"使用した項の数: {X_tr_stats.shape[1]}")
+
+            params = model.params
+            pvals = model.pvalues
+            coef_df = pd.DataFrame(
+                {"term": params.index, "coef": params.values, "p": pvals.values}
+            ).sort_values("coef", key=np.abs, ascending=False)
+            st.subheader("係数・p値（全項 Logit）")
+            st.dataframe(coef_df.head(50))
+
+            yhat_tr_prob = model.predict(X_tr_design)
+            yhat_te_prob = model.predict(X_te_design)
+
+            yhat_tr = (yhat_tr_prob >= 0.5).astype(int)
+            yhat_te = (yhat_te_prob >= 0.5).astype(int)
+
+            acc = accuracy_score(y_te, yhat_te)
+            prec = precision_score(y_te, yhat_te, average="macro", zero_division=0)
+            rec = recall_score(y_te, yhat_te, average="macro", zero_division=0)
+            f1 = f1_score(y_te, yhat_te, average="macro", zero_division=0)
+            st.write(
+                f"Accuracy={acc:.3f}, Precision(macro)={prec:.3f}, "
+                f"Recall(macro)={rec:.3f}, F1(macro)={f1:.3f}"
+            )
+
+            labs = sorted(pd.Series(y_te).unique().tolist())
+            cm = confusion_matrix(y_te, yhat_te, labels=labs)
+            cm_df = pd.DataFrame(
+                cm,
+                index=[f"T{i}" for i in labs],
+                columns=[f"P{i}" for i in labs]
+            )
+            st.write("混同行列（件数）")
+            st.dataframe(cm_df)
+
+            cm_norm = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-12)
+            fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
+            im = ax_cm.imshow(cm_norm, interpolation="nearest")
+            ax_cm.set_xticks(range(len(labs))); ax_cm.set_xticklabels(labs)
+            ax_cm.set_yticks(range(len(labs))); ax_cm.set_yticklabels(labs)
+            ax_cm.set_title("Confusion Matrix (row-normalized)")
+            for i in range(cm_norm.shape[0]):
+                for j in range(cm_norm.shape[1]):
+                    ax_cm.text(j, i, f"{cm_norm[i, j]:.2f}", ha="center", va="center")
+            fig_cm.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
+            st.pyplot(fig_cm)
