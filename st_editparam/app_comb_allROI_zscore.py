@@ -20,12 +20,17 @@ from PIL import Image
 from xgboost import XGBRegressor
 
 # ==== features_pupil / GPU 対応 =====================================
-try:
-    import features_pupil as fp
-    if cv2.cuda.getCudaEnabledDeviceCount() == 0:
-        raise ImportError("CUDA device not found")
+def cuda_available():
+    try:
+        import cupy as cp
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+if cuda_available():
+    import features_pupil_gpu as fp
     print("[INFO] Using GPU version (features_pupil_gpu)")
-except Exception:
+else:
     import features_pupil as fp
     print("[INFO] Using CPU version (features_pupil)")
 
