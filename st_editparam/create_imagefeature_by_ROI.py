@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # ===== GPU / CPU 両対応 feature モジュールを自動選択 =====
 try:
-    import features_pupil as fp
+    import features_pupil_gpu as fp
     if cv2.cuda.getCudaEnabledDeviceCount() > 0:
         print("[INFO] Using GPU version (features_pupil_gpu)")
     else:
