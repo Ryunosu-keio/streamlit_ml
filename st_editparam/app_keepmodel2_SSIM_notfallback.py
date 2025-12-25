@@ -8,10 +8,10 @@
 #
 # Fix/Improve:
 #  - 学習結果を session_state に保持（切り替えで再学習しない）
-#  - SSIMはY(輝度)で計算（進捗バー英語）
+#  - SSIMはY(輝度)で計算（進捗バー日本語）
 #  - HF_ratioはON/OFF切替 + 低解像度（downscale）で高速化
 #  - パレート最適（pupil vs ssim）を散布図で可視化（front & knee）
-#  - matplotlibの表示文字は英語のみ（文字化け回避）
+#  - matplotlibの表示文字は英語のみ（文字化け回避）  ← ここは維持
 #  - feasible_mask の長さズレを確実に防止（try/except + reset_index + 保険）
 #  - 新画像の *_orig は fallback から借りない：
 #      新画像（加工前）から特徴量を計算し、それを *_orig にマッピングして使う
@@ -37,14 +37,29 @@ from sklearn.metrics import r2_score
 from xgboost import XGBRegressor
 
 # ==== features_pupil / GPU 対応 =====================================
-try:
-    import features_pupil as fp  # GPU版がある想定
-    if cv2.cuda.getCudaEnabledDeviceCount() == 0:
-        raise ImportError("CUDA device not found")
+import warnings as _warnings
+
+def cuda_available():
+    try:
+        import cupy as cp
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+_warnings.filterwarnings(
+    "ignore",
+    message="CUDA path could not be detected.*",
+    module="cupy.*",
+)
+
+if cuda_available():
+    import features_pupil_gpu as fp
     USING_GPU = True
-except Exception:
+    print("[INFO] Using GPU version (features_pupil_gpu)")
+else:
     import features_pupil as fp
     USING_GPU = False
+    print("[INFO] Using CPU version (features_pupil)")
 
 # ==== 画面・観察距離など（features_pupil 用） =======================
 SCREEN_W_MM = 260
@@ -171,13 +186,6 @@ def compute_ssim_y(img_ref: Image.Image, img_proc: Image.Image) -> float:
     return float(np.mean(ssim_map))
 
 def hf_ratio_laplacian(img_ref: Image.Image, img_proc: Image.Image, downscale: int = 4) -> float:
-    """
-    HF ratio via Laplacian variance, computed on downscaled Y to speed up.
-
-    downscale=1: original resolution
-    downscale=2: half
-    downscale=4: quarter (recommended)
-    """
     downscale = int(max(1, downscale))
 
     ref = (_to_y01(img_ref) * 255.0).astype("uint8")
@@ -311,12 +319,6 @@ def make_weighted_globals_for_single(roi_feats: dict) -> dict:
 # New image feature computation (for *_orig, and before features)
 # ============================================================
 def compute_features_for_pil(pil_img: Image.Image) -> dict:
-    """
-    Compute features dict that matches your df feature naming style:
-      - ROI features: center_*, parafovea_*, periphery_*
-      - all_* features (from make_all_masks())
-      - all_area_* and all_pupil_* (weighted from ROI)
-    """
     img_rgb = pil_img.convert("RGB")
     img_bgr = cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
     h, w = img_bgr.shape[:2]
@@ -342,14 +344,6 @@ def build_orig_vector_from_new_image(
     fallback_df: pd.DataFrame,
     fallback_idx,
 ) -> pd.Series:
-    """
-    Create a Series aligned to orig_cols.
-    Prefer mapping from new_feats:
-      col endswith "_orig" -> base = col[:-5] -> new_feats[base]
-      col endswith "_orig_area" -> base = col[:-9]
-      col endswith "_orig_pupil" -> base = col[:-10]
-    If missing, fill with X2_means, then fallback row as last resort.
-    """
     out = pd.Series(index=orig_cols, dtype=float)
 
     for c in orig_cols:
@@ -366,27 +360,22 @@ def build_orig_vector_from_new_image(
             base = c[:-10]
             if base in new_feats:
                 v = new_feats[base]
-
         out[c] = v
 
-    # 1) fill with training means
+    # 1) training mean
     out = out.fillna(X2_means.reindex(orig_cols))
 
-    # 2) if still NaN, fallback row (very last resort)
+    # 2) last resort: fallback row
     if out.isna().any():
         for c in orig_cols:
             if pd.isna(out[c]) and c in fallback_df.columns:
                 out[c] = fallback_df.loc[fallback_idx, c]
 
-    # 3) if still NaN, 0
+    # 3) still NaN -> 0
     out = out.fillna(0.0)
     return out
 
 def image_basic_stats(pil_img: Image.Image) -> pd.DataFrame:
-    """
-    Basic statistics table for RGB and Y.
-    All numeric; can be shown as dataframe.
-    """
     rgb = np.array(pil_img.convert("RGB")).astype(np.float32)
     y = (_to_y01(pil_img) * 255.0).astype(np.float32)
 
@@ -501,7 +490,7 @@ def _get_splitter(groups):
 def grid_search_stage1(X, y, w, groups, model_type):
     param_grid = RF_PARAM_GRID_STAGE1 if model_type == "RandomForest" else XGB_PARAM_GRID_STAGE1
     total = int(np.prod([len(v) for v in param_grid.values()])) if param_grid else 1
-    prog = st.progress(0.0, text=f"Stage1 GridSearch... (0/{total})")
+    prog = st.progress(0.0, text=f"Stage1 グリッドサーチ... (0/{total})")
 
     splitter, is_group = _get_splitter(groups)
     best_score, best_params = -1e18, None
@@ -527,11 +516,11 @@ def grid_search_stage1(X, y, w, groups, model_type):
             best_train, best_test = tr_scores, te_scores
 
         done += 1
-        prog.progress(done / total, text=f"Stage1 GridSearch... ({done}/{total})")
+        prog.progress(done / total, text=f"Stage1 グリッドサーチ... ({done}/{total})")
 
     final = create_base_regressor(model_type, best_params)
     final.fit(X, y, sample_weight=w)
-    prog.progress(1.0, text="Stage1 GridSearch done")
+    prog.progress(1.0, text="Stage1 グリッドサーチ完了")
 
     cv = {"mean_train": float(np.mean(best_train)), "std_train": float(np.std(best_train)),
           "mean_test": float(np.mean(best_test)), "std_test": float(np.std(best_test))}
@@ -540,7 +529,7 @@ def grid_search_stage1(X, y, w, groups, model_type):
 def train_stage1_fixed_params(X, y, w, groups, model_type, params):
     splitter, is_group = _get_splitter(groups)
     splits = list(splitter.split(X, y, groups)) if is_group else list(splitter.split(X, y))
-    prog = st.progress(0.0, text="Stage1 training...")
+    prog = st.progress(0.0, text="Stage1 学習中...")
 
     tr_scores, te_scores = [], []
     for i, (tr_idx, te_idx) in enumerate(splits):
@@ -551,11 +540,11 @@ def train_stage1_fixed_params(X, y, w, groups, model_type, params):
         m.fit(X_tr, y_tr, sample_weight=w_tr)
         tr_scores.append(r2_score(y_tr, m.predict(X_tr)))
         te_scores.append(r2_score(y_te, m.predict(X_te)))
-        prog.progress((i + 1) / len(splits), text=f"Stage1 training... ({i+1}/{len(splits)})")
+        prog.progress((i + 1) / len(splits), text=f"Stage1 学習中... ({i+1}/{len(splits)})")
 
     final = create_base_regressor(model_type, params or {})
     final.fit(X, y, sample_weight=w)
-    prog.progress(1.0, text="Stage1 training done")
+    prog.progress(1.0, text="Stage1 学習完了")
 
     cv = {"mean_train": float(np.mean(tr_scores)), "std_train": float(np.std(tr_scores)),
           "mean_test": float(np.mean(te_scores)), "std_test": float(np.std(te_scores))}
@@ -564,7 +553,7 @@ def train_stage1_fixed_params(X, y, w, groups, model_type, params):
 def grid_search_stage2(X2, Y2, w, groups, model_type):
     param_grid = RF_PARAM_GRID_STAGE2 if model_type == "RandomForest" else XGB_PARAM_GRID_STAGE2
     total = int(np.prod([len(v) for v in param_grid.values()])) if param_grid else 1
-    prog = st.progress(0.0, text=f"Stage2 GridSearch... (0/{total})")
+    prog = st.progress(0.0, text=f"Stage2 グリッドサーチ... (0/{total})")
 
     splitter, is_group = _get_splitter(groups)
     best_score, best_params = -1e18, None
@@ -595,20 +584,20 @@ def grid_search_stage2(X2, Y2, w, groups, model_type):
             best_pred_all = np.vstack(Ypred_list)
 
         done += 1
-        prog.progress(done / total, text=f"Stage2 GridSearch... ({done}/{total})")
+        prog.progress(done / total, text=f"Stage2 グリッドサーチ... ({done}/{total})")
 
     base_final = create_base_regressor(model_type, best_params)
     mo2 = MultiOutputRegressor(base_final)
     mo2.fit(X2, Y2, sample_weight=w)
 
     r2_each = r2_score(best_Yte_all, best_pred_all, multioutput="raw_values")
-    prog.progress(1.0, text="Stage2 GridSearch done")
+    prog.progress(1.0, text="Stage2 グリッドサーチ完了")
     return mo2, best_params, r2_each, best_score
 
 def train_stage2_simple(X2, Y2, w, groups, model_type):
     splitter, is_group = _get_splitter(groups)
     splits = list(splitter.split(X2, Y2, groups)) if is_group else list(splitter.split(X2, Y2))
-    prog = st.progress(0.0, text="Stage2 training...")
+    prog = st.progress(0.0, text="Stage2 学習中...")
 
     cv_scores, Yte_list, Ypred_list = [], [], []
     for i, (tr_idx, te_idx) in enumerate(splits):
@@ -625,7 +614,7 @@ def train_stage2_simple(X2, Y2, w, groups, model_type):
         Yte_list.append(Y_te)
         Ypred_list.append(Y_pred)
 
-        prog.progress((i + 1) / len(splits), text=f"Stage2 training... ({i+1}/{len(splits)})")
+        prog.progress((i + 1) / len(splits), text=f"Stage2 学習中... ({i+1}/{len(splits)})")
 
     Yte_all = pd.concat(Yte_list, axis=0)
     Ypred_all = np.vstack(Ypred_list)
@@ -635,7 +624,7 @@ def train_stage2_simple(X2, Y2, w, groups, model_type):
     mo2 = MultiOutputRegressor(base_final)
     mo2.fit(X2, Y2, sample_weight=w)
 
-    prog.progress(1.0, text="Stage2 training done")
+    prog.progress(1.0, text="Stage2 学習完了")
     return mo2, {}, r2_each, float(np.mean(cv_scores))
 
 # ============================================================
@@ -660,7 +649,6 @@ def pareto_front_mask(df: pd.DataFrame, x_col: str, y_col: str, maximize_x=True,
     return keep
 
 def knee_point_on_front(front: pd.DataFrame, ssim_col: str, pupil_col: str):
-    # ideal: (SSIM high, pupil low)
     f = front.sort_values(ssim_col, ascending=True).reset_index(drop=True)
     q = f[ssim_col].values.astype(float)
     p = f[pupil_col].values.astype(float)
@@ -692,7 +680,7 @@ def get_state():
 # main
 # ============================================================
 def main():
-    st.set_page_config(page_title="Processing Recommender (Model2)", layout="wide")
+    st.set_page_config(page_title="画像加工レコメンダ（Model2）", layout="wide")
 
     st.markdown("""
     <style>
@@ -701,17 +689,17 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # matplotlib: English-friendly default font
+    # matplotlib は英語固定（文字化け回避）
     plt.rcParams["font.family"] = "DejaVu Sans"
 
-    st.title("🧪 Image Features → Pupil → Processing Recommender (Model2)")
-    st.caption(f"features_pupil backend: {'GPU' if USING_GPU else 'CPU'}")
+    st.title("🧪 画像特徴 → 瞳孔 → 画像加工レコメンダ（Model2）")
+    st.caption(f"features_pupil バックエンド: {'GPU' if USING_GPU else 'CPU'}")
 
     # ---------- Data ----------
-    st.sidebar.header("📁 Input data")
-    uploaded_file = st.sidebar.file_uploader("Experiment data (CSV/Excel)", type=["csv", "xlsx", "xls"])
+    st.sidebar.header("📁 入力データ")
+    uploaded_file = st.sidebar.file_uploader("実験データ（CSV / Excel）", type=["csv", "xlsx", "xls"])
     if uploaded_file is None:
-        st.info("Upload a dataset from the sidebar.")
+        st.info("左のサイドバーからデータセットをアップロードしてください。")
         return
 
     df_full = load_and_parse_data(uploaded_file)
@@ -720,13 +708,15 @@ def main():
     # Exclude subjects
     if "folder_name" in df_full.columns:
         all_subjects = sorted(df_full["folder_name"].dropna().unique().tolist())
-        excluded = st.sidebar.multiselect("Exclude folder_name", options=all_subjects)
+        excluded = st.sidebar.multiselect("除外する folder_name", options=all_subjects)
         if excluded:
             df_full = df_full[~df_full["folder_name"].isin(excluded)].copy()
 
     # CV setting
-    st.sidebar.subheader("🧪 CV settings")
-    use_group = st.sidebar.checkbox("Use GroupKFold", value=("folder_name" in df_full.columns))
+    st.sidebar.subheader("🧪 CV 設定")
+    use_group_default = ("folder_name" in df_full.columns)
+    use_group = st.sidebar.checkbox("GroupKFold を使う", value=use_group_default)
+
     groups = None
     if use_group:
         cand = []
@@ -736,37 +726,52 @@ def main():
                 cand.append(c)
         if cand:
             default = cand.index("folder_name") if "folder_name" in cand else 0
-            group_col = st.sidebar.selectbox("Group column", options=cand, index=default)
+            group_col = st.sidebar.selectbox("グループ列", options=cand, index=default)
             groups = df_full[group_col]
         else:
-            st.sidebar.warning("No valid group column found. Using KFold instead.")
+            st.sidebar.warning("有効なグループ列が見つかりません。KFold に切り替えます。")
             groups = None
 
     sample_weights = compute_sample_weights(df_full)
 
-    tab1, tab2 = st.tabs(["📊 Data overview", "🧬 Recommend (Model2)"])
+    tab1, tab2 = st.tabs(["📊 データ概要", "🧬 推奨（Model2）"])
 
     with tab1:
-        st.subheader("Dataset overview")
-        st.write(f"Rows: **{len(df_full)}**")
+        st.subheader("データセット概要")
+        st.write(f"行数: **{len(df_full)}**")
         st.dataframe(df_full.head(), use_container_width=True)
 
     with tab2:
-        st.header("🧬 Recommend (Model2)")
+        st.header("🧬 推奨（Model2）")
 
         num_cols = df_full.select_dtypes(include=[np.number]).columns.tolist()
         if not num_cols:
-            st.error("No numeric columns found.")
+            st.error("数値列が見つかりません。")
             return
 
         default_pupil = "corrected_pupil" if "corrected_pupil" in num_cols else num_cols[0]
-        pupil_col = st.selectbox("Target (pupil column)", options=num_cols, index=num_cols.index(default_pupil))
+        pupil_col = st.selectbox("目的変数（瞳孔列）", options=num_cols, index=num_cols.index(default_pupil))
 
-        direction = st.radio("Desired direction", ["Smaller is better (constriction)", "Larger is better (dilation)"],
-                             index=0, horizontal=True)
-        sign_dir = -1.0 if "Smaller" in direction else 1.0
+        dir_choice = st.radio(
+            "望ましい方向",
+            ["小さいほど良い（縮瞳）", "大きいほど良い（散瞳）"],
+            index=0,
+            horizontal=True
+        )
+        sign_dir = -1.0 if "小さい" in dir_choice else 1.0
 
-        feat_group = st.radio("Feature group", ["all", "all_area", "all_pupil", "ROI"], index=0, horizontal=True)
+        feat_choice = st.radio(
+            "特徴量グループ",
+            ["全体（all）", "領域重み（all_area）", "瞳孔重み（all_pupil）", "ROI別（center/parafovea/periphery）"],
+            index=0,
+            horizontal=True
+        )
+        feat_group = {
+            "全体（all）": "all",
+            "領域重み（all_area）": "all_area",
+            "瞳孔重み（all_pupil）": "all_pupil",
+            "ROI別（center/parafovea/periphery）": "ROI",
+        }[feat_choice]
 
         # Candidate columns
         if feat_group == "all":
@@ -784,71 +789,75 @@ def main():
                               and "_orig" not in c and c not in NON_FEATURE_COLS and c != pupil_col]
 
         if not candidate_cols:
-            st.error("No candidate features found.")
+            st.error("候補特徴量が見つかりません。")
             return
 
-        st.caption(f"Candidate features: {len(candidate_cols)}")
+        st.caption(f"候補特徴量数: {len(candidate_cols)}")
 
         # ---- top_k slider robust (avoid Streamlit min==max crash) ----
         max_k = min(30, len(candidate_cols))
         min_k = 3 if max_k >= 3 else 1
         if max_k <= min_k:
             top_k = int(max_k)
-            st.info(f"top_k fixed to {top_k} (not enough candidates for a slider).")
+            st.info(f"top_k を {top_k} に固定しました（候補が少ないためスライダーを出せません）。")
         else:
             default_k = min(10, max_k)
-            top_k = st.slider("Top-k (used for z)", min_k, max_k, default_k)
+            top_k = st.slider("Top-k（z の計算に使用）", min_k, max_k, default_k)
 
-        n_trials_per_pattern = st.slider("Trials per pattern (fast search)", 200, 5000, 1000, 200)
+        n_trials_per_pattern = st.slider("パターンごとの試行回数（高速探索）", 200, 5000, 1000, 200)
 
-        model1_type = st.radio("Model1 (features → pupil)", ["RandomForest", "XGBoost"], index=0, horizontal=True)
-        model2_type = st.radio("Model2 (params+orig → features)", ["RandomForest", "XGBoost"], index=0, horizontal=True)
-        use_grid1 = st.checkbox("Stage1 GridSearch", value=True)
-        use_grid2 = st.checkbox("Stage2 GridSearch", value=True)
+        m1_label = st.radio("モデル1（特徴量 → 瞳孔）", ["ランダムフォレスト", "XGBoost"], index=0, horizontal=True)
+        m2_label = st.radio("モデル2（加工パラメータ+orig → 特徴量）", ["ランダムフォレスト", "XGBoost"], index=0, horizontal=True)
+        model1_type = "RandomForest" if m1_label == "ランダムフォレスト" else "XGBoost"
+        model2_type = "RandomForest" if m2_label == "ランダムフォレスト" else "XGBoost"
 
-        objective_mode = st.radio(
-            "Fast-search objective",
-            ["Maximize z (legacy)", "Minimize pupil (recommended)"],
-            index=1,
+        use_grid1 = st.checkbox("Stage1 GridSearch（ハイパラ探索）", value=True)
+        use_grid2 = st.checkbox("Stage2 GridSearch（ハイパラ探索）", value=True)
+
+        obj_choice = st.radio(
+            "高速探索の目的関数",
+            ["瞳孔を最小化（推奨）", "z を最大化（従来）"],
+            index=0,
             horizontal=True
         )
+        objective_mode = "pupil" if "瞳孔" in obj_choice else "z"
 
-        st.markdown("### 🎛 Quality control (evaluated on real images for top candidates)")
+        st.markdown("### 🎛 品質評価（上位候補のみ実画像で評価）")
 
-        # HF_ratio toggle + downscale
-        hf_enabled = st.checkbox("Enable HF_ratio (optional)", value=False)
-        hf_downscale = st.slider("HF downscale factor", 1, 8, 4, 1) if hf_enabled else 4
+        hf_enabled = st.checkbox("HF_ratio を有効化（任意）", value=False)
+        hf_downscale = st.slider("HF 計算の縮小率（downscale）", 1, 8, 4, 1) if hf_enabled else 4
 
-        quality_mode = st.radio(
-            "Final selection mode",
-            ["Constraint (SSIM>=th & HF<=th)", "Composite J", "Pareto (pupil vs SSIM)"],
-            index=2
+        qm_choice = st.radio(
+            "最終選抜モード",
+            ["パレート（瞳孔 vs SSIM）", "制約（SSIM>=閾値 & HF<=閾値）", "合成スコア J"],
+            index=0,
         )
+        quality_mode = {"制約": "constraint", "合成": "composite"}.get(qm_choice[:2], "pareto")
 
-        ssim_th = st.slider("SSIM(Y) threshold", 0.5, 1.0, 0.7, 0.01)
-        hf_th = st.slider("HF_ratio max (1.0=same; larger=more HF)", 1.0, 10.0, 2.0, 0.1)
-        max_candidates_for_quality = st.slider("Candidates to evaluate with SSIM/HF", 100, 5000, 1000, 100)
+        ssim_th = st.slider("SSIM(Y) の閾値", 0.5, 1.0, 0.7, 0.01)
+        hf_th = st.slider("HF_ratio の上限（1.0=同等、増えるほど高周波が増加）", 1.0, 10.0, 2.0, 0.1)
+        max_candidates_for_quality = st.slider("SSIM/HF を評価する候補数", 100, 5000, 1000, 100)
 
         alpha = st.number_input("alpha", value=1.0, step=0.1)
         beta  = st.number_input("beta", value=1.0, step=0.1)
-        gamma = st.number_input("gamma (HF penalty)", value=0.5, step=0.1)
+        gamma = st.number_input("gamma（HF ペナルティ）", value=0.5, step=0.1)
 
         # Image input
-        st.subheader("New image input (for Q evaluation / before-after display)")
-        if st.button("🧹 Clear image upload"):
+        st.subheader("新規画像入力（品質評価 / Before-After 表示用）")
+        if st.button("🧹 画像アップロードをクリア"):
             st.session_state["new_img_key"] = str(np.random.randint(0, 10**9))
 
         if "new_img_key" not in st.session_state:
             st.session_state["new_img_key"] = "new_img"
 
         new_image_file = st.file_uploader(
-            "New image (jpg/jpeg/png)",
+            "新規画像（jpg / jpeg / png）",
             type=["jpg", "jpeg", "png"],
             key=st.session_state["new_img_key"]
         )
 
-        st.caption("If no image is provided, Q evaluation is skipped and the best is chosen by fast-search objective.")
-        fallback_idx = st.selectbox("Fallback row (used only when no image, or missing feature mapping)", options=df_full.index)
+        st.caption("画像がない場合、品質評価（SSIM/HF）はスキップし、高速探索の目的関数だけで選びます。")
+        fallback_idx = st.selectbox("フォールバック行（画像なし/特徴量欠損時のみ使用）", options=df_full.index)
 
         # -------- Training button --------
         state = get_state()
@@ -856,9 +865,9 @@ def main():
         def train_key():
             return (fp_df, pupil_col, feat_group, top_k, model1_type, model2_type, use_grid1, use_grid2, bool(groups is not None))
 
-        if st.button("🚀 Train (Model1 & Model2)"):
+        if st.button("🚀 学習（Model1 & Model2）"):
             key = train_key()
-            with st.spinner("Training..."):
+            with st.spinner("学習中..."):
                 # ---- Stage1 ----
                 X_all = df_full[candidate_cols].copy()
                 y = df_full[pupil_col].copy()
@@ -904,7 +913,7 @@ def main():
                 X2 = pd.concat([X_param, X_orig], axis=1) if not X_orig.empty else X_param.copy()
 
                 if X2.empty:
-                    st.error("Stage2 inputs are empty (param/_orig not found).")
+                    st.error("Stage2 の入力が空です（param / _orig が見つかりません）。")
                     st.stop()
 
                 Y2 = df_full[selected].copy()
@@ -936,38 +945,38 @@ def main():
                     "orig_cols": orig_cols,
                 }
 
-            st.success("Training completed. The results are kept in session state.")
+            st.success("学習が完了しました（結果は session_state に保持されます）。")
 
         # -------- Show trained results --------
         key = train_key()
         trained = state.get(key)
 
         if trained is None:
-            st.info("Click 'Train (Model1 & Model2)' first.")
+            st.info("先に「学習（Model1 & Model2）」を押してください。")
             return
 
-        st.subheader("Stage1 importance (full)")
+        st.subheader("Stage1 重要度（全特徴）")
         st.dataframe(trained["imp_df"].head(30), use_container_width=True)
 
         st.subheader("Stage1 CV")
         cv1f = trained["cv1_full"]
         cv1s = trained["cv1_sel"]
-        st.write(f"Full features Test R2: **{cv1f['mean_test']:.3f} ± {cv1f['std_test']:.3f}**")
-        st.write(f"Top-k        Test R2: **{cv1s['mean_test']:.3f} ± {cv1s['std_test']:.3f}**")
+        st.write(f"全特徴の Test R2: **{cv1f['mean_test']:.3f} ± {cv1f['std_test']:.3f}**")
+        st.write(f"Top-k の Test R2: **{cv1s['mean_test']:.3f} ± {cv1s['std_test']:.3f}**")
 
-        st.subheader("z weights (top-k)")
+        st.subheader("z の重み（Top-k）")
         z_w_df = pd.DataFrame({"feature": trained["selected"], "weight": [trained["z_w"][f] for f in trained["selected"]]})
         st.dataframe(z_w_df, use_container_width=True)
 
-        st.subheader("Stage2 CV (feature prediction)")
+        st.subheader("Stage2 CV（特徴量の予測）")
         r2_df2 = pd.DataFrame({"feature": trained["selected"], "Test_R2": trained["r2_each2"]})
         st.dataframe(r2_df2, use_container_width=True)
-        st.caption(f"Mean Test R2: {trained['r2_mean2']:.3f}")
+        st.caption(f"平均 Test R2: {trained['r2_mean2']:.3f}")
 
         # ============================================================
         # Recommend
         # ============================================================
-        if st.button("🔍 Run recommendation (fast search → quality eval)"):
+        if st.button("🔍 推奨実行（高速探索 → 品質評価）"):
             selected = trained["selected"]
             m1 = trained["m1_sel"]
             m2 = trained["m2"]
@@ -989,7 +998,7 @@ def main():
                 try:
                     feats_before = compute_features_for_pil(new_img_pil)
                 except Exception as e:
-                    st.error(f"Feature computation failed for new image: {e}")
+                    st.error(f"新規画像の特徴量計算に失敗しました: {e}")
                     st.stop()
             else:
                 feats_before = {f: df_full.loc[fallback_idx, f] for f in selected if f in df_full.columns}
@@ -1004,15 +1013,15 @@ def main():
                     miss.append(f)
                     x_before[f] = np.nan
             if miss:
-                st.warning(f"Missing features from new image: {miss} -> filled with training mean")
+                st.warning(f"新規画像で取得できない特徴量があります: {miss} → 学習データ平均で補完します。")
             x_before = x_before.fillna(img_feature_means)
 
             pupil_before = float(m1.predict(x_before.values.reshape(1, -1))[0])
             z_before = float(np.sum([z_w[f] * ((x_before[f] - feat_mean[f]) / feat_std[f]) for f in selected]))
 
-            st.subheader("Before processing (prediction)")
-            st.write(f"Predicted pupil: **{pupil_before:.3f}**")
-            st.write(f"z score: **{z_before:.3f}**")
+            st.subheader("加工前の予測")
+            st.write(f"予測瞳孔: **{pupil_before:.3f}**")
+            st.write(f"z スコア: **{z_before:.3f}**")
 
             # --- new image *_orig vector for stage2 (IMPORTANT FIX) ---
             if new_img_pil is not None and orig_cols:
@@ -1023,9 +1032,8 @@ def main():
                     fallback_df=df_full,
                     fallback_idx=fallback_idx,
                 )
-                st.caption("Stage2 *_orig is computed from the new image (not borrowed from fallback).")
+                st.caption("Stage2 の *_orig は新規画像から計算しています（フォールバックから借りません）。")
             else:
-                # no image or no orig cols -> fallback means
                 orig_vec = pd.Series(index=orig_cols, dtype=float)
                 for c in orig_cols:
                     if c in df_full.columns:
@@ -1036,7 +1044,7 @@ def main():
             allowed = generate_allowed_patterns()
             sim_records = []
 
-            with st.spinner("Fast search (predict features by Model2)..."):
+            with st.spinner("高速探索（Model2で特徴推定 → Model1で瞳孔推定）..."):
                 prog = st.progress(0.0, text="0%")
                 total_steps = len(allowed)
 
@@ -1086,19 +1094,19 @@ def main():
                         "step3_op": op3, "step3_val": vals3,
                     })
 
-                    # objective
-                    if objective_mode.startswith("Maximize"):
+                    if objective_mode == "z":
                         df_pat["Objective"] = df_pat["Score_z"]
                     else:
                         df_pat["Objective"] = -df_pat["Pupil"]  # smaller pupil is better
 
                     sim_records.append(df_pat)
 
-                    prog.progress((pi + 1) / total_steps, text=f"{pi+1}/{total_steps} patterns")
+                    prog.progress((pi + 1) / total_steps, text=f"{pi+1}/{total_steps} パターン")
 
                 sim_all = pd.concat(sim_records, ignore_index=True)
 
-            st.subheader("Fast search summary (18 patterns)")
+            st.subheader("高速探索サマリー（18パターン）")
+
             def top5_mean(x):
                 k = max(1, int(len(x) * 0.05))
                 return x.nlargest(k).mean()
@@ -1111,17 +1119,17 @@ def main():
 
             # --- Quality evaluation (only if image exists) ---
             if new_img_pil is None:
-                st.warning("No image: quality evaluation is skipped. Using Objective best.")
+                st.warning("画像がないため品質評価をスキップします。目的関数の最大で選びます。")
                 best = sim_all.loc[sim_all["Objective"].idxmax()].copy()
                 best["SSIM"] = np.nan
                 best["HF_ratio"] = np.nan
             else:
                 cand = sim_all.sort_values("Objective", ascending=False).head(max_candidates_for_quality).copy()
-                cand = cand.reset_index(drop=True)  # IMPORTANT
+                cand = cand.reset_index(drop=True)
 
-                with st.spinner("Quality evaluation (SSIM / HF)..."):
+                with st.spinner("品質評価（SSIM / HF）..."):
                     total_q = len(cand)
-                    q_prog = st.progress(0.0, text=f"Quality evaluation: 0/{total_q}")
+                    q_prog = st.progress(0.0, text=f"品質評価: 0/{total_q}")
 
                     ssim_list, hf_list, J_list, feasible_mask = [], [], [], []
 
@@ -1163,9 +1171,8 @@ def main():
 
                         if (ii + 1) % 10 == 0 or (ii + 1) == total_q:
                             q_prog.progress((ii + 1) / max(1, total_q),
-                                            text=f"Quality evaluation: {ii+1}/{total_q}")
+                                            text=f"品質評価: {ii+1}/{total_q}")
 
-                    # Safety: force same length
                     if len(feasible_mask) != len(cand):
                         m = min(len(feasible_mask), len(cand))
                         ssim_list = ssim_list[:m]
@@ -1179,15 +1186,15 @@ def main():
                     cand["J"] = J_list
                     cand["feasible"] = feasible_mask
 
-                    q_prog.progress(1.0, text="Quality evaluation: done")
+                    q_prog.progress(1.0, text="品質評価: 完了")
 
-                st.subheader("Evaluated candidates (top)")
+                st.subheader("評価済み候補（上位）")
                 show_cols = ["pattern", "Objective", "Score_z", "Pupil", "SSIM", "HF_ratio", "J", "feasible",
                              "step1_op", "step1_val", "step2_op", "step2_val", "step3_op", "step3_val"]
                 st.dataframe(cand[show_cols].head(200), use_container_width=True)
 
                 # ---- Pareto visualization (pupil vs ssim) ----
-                st.subheader("Scatter: SSIM vs pupil (Pareto front highlighted)")
+                st.subheader("散布図: SSIM vs 瞳孔（パレート最適を強調）")
 
                 plot_df = cand.dropna(subset=["SSIM", "Pupil"]).copy()
                 if len(plot_df) >= 2:
@@ -1212,23 +1219,22 @@ def main():
                     ax.legend()
                     st.pyplot(fig)
                 else:
-                    st.info("Not enough valid points to draw Pareto front.")
+                    st.info("パレートフロントを描くための有効点が足りません。")
 
                 # ---- Select best ----
-                if quality_mode.startswith("Constraint"):
+                if quality_mode == "constraint":
                     feasible = cand[cand["feasible"]].copy()
                     if feasible.empty:
-                        st.warning("No feasible candidates. Using max J instead.")
+                        st.warning("制約を満たす候補がありません。代わりに J 最大を採用します。")
                         best = cand.loc[cand["J"].idxmax()].copy()
                     else:
                         best = feasible.loc[feasible["Objective"].idxmax()].copy()
-                elif quality_mode.startswith("Composite"):
+                elif quality_mode == "composite":
                     best = cand.loc[cand["J"].idxmax()].copy()
                 else:
-                    # Pareto based selection
                     plot_df = cand.dropna(subset=["SSIM", "Pupil"]).copy()
                     if len(plot_df) < 2:
-                        st.warning("Not enough valid points for Pareto. Using max J instead.")
+                        st.warning("パレート選択に必要な有効点が足りません。代わりに J 最大を採用します。")
                         best = cand.loc[cand["J"].idxmax()].copy()
                     else:
                         front_mask = pareto_front_mask(plot_df, x_col="SSIM", y_col="Pupil", maximize_x=True, maximize_y=False)
@@ -1239,17 +1245,17 @@ def main():
             # Best display + before/after stats
             # ============================================================
             st.divider()
-            st.subheader("👑 Best processing")
+            st.subheader("👑 最良の加工条件")
 
             ops_best = [best["step1_op"], best["step2_op"], best["step3_op"]]
             vals_best = [best["step1_val"], best["step2_val"], best["step3_val"]]
 
             st.markdown(
-                f"- pattern: **{best['pattern'].replace('_',' → ')}**  \n"
+                f"- パターン: **{best['pattern'].replace('_',' → ')}**  \n"
                 f"- step1: **{ops_best[0]}** = `{vals_best[0]:.3f}`  \n"
                 f"- step2: **{ops_best[1]}** = `{vals_best[1]:.3f}`  \n"
                 f"- step3: **{ops_best[2]}** = `{vals_best[2]:.3f}`  \n"
-                f"- predicted pupil: **{float(best['Pupil']):.3f}**  \n"
+                f"- 予測瞳孔: **{float(best['Pupil']):.3f}**  \n"
                 f"- SSIM(Y): **{float(best.get('SSIM', np.nan)):.3f}**  \n"
                 f"- HF_ratio: **{float(best.get('HF_ratio', np.nan)):.3f}**"
             )
@@ -1259,11 +1265,11 @@ def main():
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.image(new_img_pil, caption="Before", use_container_width=True)
+                    st.image(new_img_pil, caption="加工前", use_container_width=True)
                 with c2:
-                    st.image(img_after, caption="After", use_container_width=True)
+                    st.image(img_after, caption="加工後", use_container_width=True)
 
-                st.subheader("Basic image statistics (Before vs After)")
+                st.subheader("基本統計（Before vs After）")
                 df_b = image_basic_stats(new_img_pil)
                 df_a = image_basic_stats(img_after)
                 df_b["image"] = "Before"
@@ -1274,3 +1280,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python -m streamlit run app_keepmodel2_SSIM_notfallback.py
