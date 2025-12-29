@@ -2079,7 +2079,7 @@ if ml_type == "Polynomial":
                 hi = max(y_tr.max(), y_te.max(), yhat_tr.max(), yhat_te.max())
                 ax.plot([lo, hi], [lo, hi], "--")
                 ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
-                ax.setタイトル("Actual vs Predicted (AIC-Poly)")
+                ax.set_title("Actual vs Predicted (AIC-Poly)")
                 ax.legend()
                 st.pyplot(fig)
 
