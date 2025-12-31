@@ -101,7 +101,8 @@ else:
 # ==== 画面・観察距離など（features_pupil 用） =======================
 SCREEN_W_MM = 260
 DIST_MM     = 450
-RES_X       = 6000
+# RES_X       = 6000   実験画像横幅
+RES_X = 1500
 CENTER_DEG  = 2
 PARAFOVEA_DEG = 5
 
@@ -521,8 +522,23 @@ def image_basic_stats(pil_img: Image.Image) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series) -> pd.Series:
+# def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series) -> pd.Series:
+#     x = pd.Series(index=selected, dtype=float)
+#     miss = []
+#     for f in selected:
+#         if f in feats:
+#             x[f] = float(feats[f])
+#         else:
+#             x[f] = np.nan
+#             miss.append(f)
+#     if miss:
+#         st.warning(f"特徴量欠損 {len(miss)}/{len(selected)}: {miss[:8]}{' ...' if len(miss)>8 else ''} → 学習データ平均で補完")
+#     return x.fillna(img_feature_means.reindex(selected)).fillna(0.0)
+
+def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series, tag: str = "") -> pd.Series:
+    feats = feats or {}
     x = pd.Series(index=selected, dtype=float)
+
     miss = []
     for f in selected:
         if f in feats:
@@ -530,17 +546,37 @@ def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series
         else:
             x[f] = np.nan
             miss.append(f)
-    if miss:
-        st.warning(f"特徴量欠損: {miss} → 学習データ平均で補完します。")
-    return x.fillna(img_feature_means.reindex(selected)).fillna(0.0)
+
+    if len(miss) > 0:
+        st.error(f"[{tag}] selectedに対して特徴量が欠損 {len(miss)}/{len(selected)}。"
+                 f" 例: {miss[:20]}")
+        st.write(f"[{tag}] feats keys 例:", list(feats.keys())[:30])
+        st.stop()  # ★平均埋めで誤魔化さず止める
+
+    return x
+
+
+# def predict_stage1_from_x(m1, x: pd.Series, stage1_task: str) -> dict:
+#     X = x.to_frame().T  # ★DataFrameに統一（列名付き）
+#     X = x.values.reshape(1, -1)
+#     if stage1_task == "reg":
+#         return {"pupil": float(m1.predict(X)[0]), "p_shrink": np.nan}
+#     else:
+#         return {"pupil": np.nan, "p_shrink": float(m1.predict_proba(X)[:, 1][0])}
 
 def predict_stage1_from_x(m1, x: pd.Series, stage1_task: str) -> dict:
-    X = x.to_frame().T  # ★DataFrameに統一（列名付き）
-    X = x.values.reshape(1, -1)
+    X = x.to_frame().T  # 1行DataFrame（列名あり）
+
+    # 学習時の列順に揃える（これが超重要）
+    if hasattr(m1, "feature_names_in_"):
+        X = X.reindex(columns=list(m1.feature_names_in_), fill_value=0.0)
+
     if stage1_task == "reg":
         return {"pupil": float(m1.predict(X)[0]), "p_shrink": np.nan}
     else:
-        return {"pupil": np.nan, "p_shrink": float(m1.predict_proba(X)[:, 1][0])}
+        proba = m1.predict_proba(X)
+        return {"pupil": np.nan, "p_shrink": float(proba[:, 1][0])}
+
 
 # ============================================================
 # 18 patterns / param ranges
@@ -1365,7 +1401,7 @@ def optuna_tune_stage1(
 # main
 # ============================================================
 def main():
-    st.set_page_config(page_title="画像加工レコメンダ（Model2）", layout="wide")
+    st.set_page_config(page_title="画像加工レコメンダ（Model2）編集用", layout="wide")
 
     st.markdown("""
     <style>
@@ -1377,7 +1413,7 @@ def main():
     # matplotlib は英語固定（文字化け回避）
     plt.rcParams["font.family"] = "DejaVu Sans"
 
-    st.title("🧪 画像特徴 →（回帰/分類）→ 画像加工レコメンダ（Model2）")
+    st.title("🧪 画像特徴 →（回帰/分類）→ 画像加工レコメンダ（Model2）編集用")
     st.caption(f"features_pupil backend: {'GPU' if USING_GPU else 'CPU'}")
 
     # ---------- sidebar: deps ----------
@@ -1769,7 +1805,7 @@ def main():
 
         # 閾値（SSIM/PSNRで切替）
         if quality_metric_key == "SSIM":
-            q_th = st.slider("SSIM(Luma) の閾値", 0.2, 1.0, 0.7, 0.01)
+            q_th = st.slider("SSIM(Luma) の閾値", 0.2, 1.0, 0.3, 0.01)
         else:
             q_th = st.slider("PSNR(Luma) の閾値 [dB]", 10.0, 60.0, 25.0, 0.5)
 
@@ -2342,16 +2378,29 @@ def main():
                     knee = None
                     if len(front) >= 2:
                         # knee = knee_point_on_front(front, x_col="Q", y_col=y_col, maximize_y=maximize_y)
-                        knee = knee_point_on_front(front, x_col="Q", y_col=y_col, maximize_y=maximize_y,
-                           mode=pareto_selection_mode, x_min=float(q_th))
+                        # knee = knee_point_on_front(front, x_col="Q", y_col=y_col, maximize_y=maximize_y,
+                        #    mode=pareto_selection_mode, x_min=float(q_th))
+                        knee = knee_point_on_front(
+                                front,
+                                x_col="Q",
+                                y_col=y_col,
+                                maximize_y=maximize_y,
+                                mode=pareto_selection_mode,
+                                x_min=None # ★追加：SSIM/PSNR 閾値無視
+                            )
 
 
                     fig, ax = plt.subplots(figsize=(8, 6))
                     ax.scatter(plot_df["Q"], plot_df[y_col], alpha=0.25, label="All candidates")
                     ax.scatter(front["Q"], front[y_col], alpha=0.9, label="Pareto front")
 
-                    if knee is not None:
-                        ax.scatter([knee["Q"]], [knee[y_col]], marker="*", s=200, label="Knee point")
+                    # if knee is not None:
+                    #     ax.scatter([knee["Q"]], [knee[y_col]], marker="*", s=200, label="Knee point")
+                    if pareto_selection_mode == "knee" and knee is not None:
+                        ax.scatter([knee["Q"]], [knee[y_col]], marker="*", s=200, label="Knee Point")
+                    elif pareto_selection_mode == "extreme" :
+                        ax.scatter([knee["Q"]], [knee[y_col]], marker="*", s=200, label="Max Point")
+
 
                     ax.set_xlabel(f"{quality_metric_key}(Luma)  ↑")
                     ax.set_ylabel(y_label)
@@ -2397,14 +2446,14 @@ def main():
                         best = cand.loc[cand["J"].idxmax()].copy()
                     else:
                         # ★★★ 事前に選択された mode を使用 ★★★
-                        # best = knee_point_on_front(front, x_col="Q", y_col=y_col, maximize_y=maximize_y, mode=pareto_selection_mode)
+                        # best = knee_point_on_front(front, x_col="Q", y_col=y_col, maximize_y=maximize_y, mode=pareto_selection_mode, x_min=float(q_th))
                         best = knee_point_on_front(
                                 front,
                                 x_col="Q",
                                 y_col=y_col,
                                 maximize_y=maximize_y,
                                 mode=pareto_selection_mode,
-                                x_min=float(q_th),  # ★追加：SSIM/PSNR 閾値以上のみ
+                                x_min=float(q_th),  # ★追加：SSIM/PSNR 閾値無視
                             )
 
                         if best is None:
@@ -2496,31 +2545,60 @@ def main():
                 feats_b = compute_features_for_pil(img_b)
                 feats_c = compute_features_for_pil(img_c)
 
-                x_a = build_x_from_feats(feats_a, selected, img_feature_means)
-                x_b = build_x_from_feats(feats_b, selected, img_feature_means)
-                x_c = build_x_from_feats(feats_c, selected, img_feature_means)
+                x_a = build_x_from_feats(feats_a, selected, img_feature_means,tag="A")
+                x_b = build_x_from_feats(feats_b, selected, img_feature_means, tag="B")
+                x_c = build_x_from_feats(feats_c, selected, img_feature_means, tag="C")
 
+                # ★ 入力特徴量の中身を必ず表示（要求）
+                feat_tbl = pd.DataFrame({
+                    "A": x_a,
+                    "B": x_b,
+                    "C": x_c,
+                })
+                feat_tbl["B-A"] = feat_tbl["B"] - feat_tbl["A"]
+                feat_tbl["C-A"] = feat_tbl["C"] - feat_tbl["A"]
+                feat_tbl = feat_tbl.reset_index().rename(columns={"index": "feature"})
+                st.markdown("#### Stage1に入れた特徴量（A/B/C）")
+                st.dataframe(feat_tbl, use_container_width=True)
+
+                # ★ A/B/Cで本当に違いがあるか簡易チェック
+                same_ab = np.allclose(x_a.values, x_b.values, rtol=0, atol=1e-12)
+                same_ac = np.allclose(x_a.values, x_c.values, rtol=0, atol=1e-12)
+                if same_ab and same_ac:
+                    st.error("A/B/C の Stage1入力特徴量が同一です（= 予測が同じのは当然）。特徴量名の不一致 or 欠損→平均補完を疑ってください。")
+
+                # ★ 予測（列名維持版の predict_stage1_from_x を使う）
                 pred_a = predict_stage1_from_x(m1, x_a, stage1_task)
                 pred_b = predict_stage1_from_x(m1, x_b, stage1_task)
                 pred_c = predict_stage1_from_x(m1, x_c, stage1_task)
 
+                # ★ 縮瞳値（Δpred）を計算して表示（要求）
                 if stage1_task == "reg":
+                    # shrink量を「Aからどれだけ小さくなったか」で定義（+が縮瞳）
+                    shrink_b = float(pred_a["pupil"] - pred_b["pupil"])
+                    shrink_c = float(pred_a["pupil"] - pred_c["pupil"])
+
                     pred_rows = [
-                        {"image": "A (original)", "pred_pupil": pred_a["pupil"], "pred_P(shrink)": np.nan},
-                        {"image": "B (brightness-only, mean matched)", "pred_pupil": pred_b["pupil"], "pred_P(shrink)": np.nan},
-                        {"image": "C (model best)", "pred_pupil": pred_c["pupil"], "pred_P(shrink)": np.nan},
+                        {"image": "A (original)", "pred_pupil": pred_a["pupil"], "shrink_vs_A": 0.0},
+                        {"image": "B (brightness-only, mean matched)", "pred_pupil": pred_b["pupil"], "shrink_vs_A": shrink_b},
+                        {"image": "C (model best)", "pred_pupil": pred_c["pupil"], "shrink_vs_A": shrink_c},
                     ]
-                    st.caption("Regression mode: smaller = more shrink-side (predicted pupil)")
+                    st.caption("Regression mode: pred_pupil が小さいほど縮瞳。shrink_vs_A = pred_pupil(A) - pred_pupil(X)（+が縮瞳）")
                 else:
+                    # 縮瞳確率の増分（+が縮瞳側）
+                    d_b = float(pred_b["p_shrink"] - pred_a["p_shrink"])
+                    d_c = float(pred_c["p_shrink"] - pred_a["p_shrink"])
+
                     pred_rows = [
-                        {"image": "A (original)", "pred_pupil": np.nan, "pred_P(shrink)": pred_a["p_shrink"]},
-                        {"image": "B (brightness-only, mean matched)", "pred_pupil": np.nan, "pred_P(shrink)": pred_b["p_shrink"]},
-                        {"image": "C (model best)", "pred_pupil": np.nan, "pred_P(shrink)": pred_c["p_shrink"]},
+                        {"image": "A (original)", "pred_P(shrink)": pred_a["p_shrink"], "delta_vs_A": 0.0},
+                        {"image": "B (brightness-only, mean matched)", "pred_P(shrink)": pred_b["p_shrink"], "delta_vs_A": d_b},
+                        {"image": "C (model best)", "pred_P(shrink)": pred_c["p_shrink"], "delta_vs_A": d_c},
                     ]
-                    st.caption("Classification mode: larger P(shrink) = more shrink-side")
+                    st.caption("Classification mode: pred_P(shrink) が大きいほど縮瞳側。delta_vs_A = P(X) - P(A)（+が縮瞳側）")
 
                 st.dataframe(pd.DataFrame(pred_rows), use_container_width=True)
 
+                # ---- Basic stats for A/B/C ----
                 st.subheader("Basic stats (A/B/C)")
                 dfA = image_basic_stats(img_a); dfA["image"] = "A"
                 dfB = image_basic_stats(img_b); dfB["image"] = "B"
