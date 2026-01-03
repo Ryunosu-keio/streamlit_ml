@@ -19,7 +19,11 @@
 #  - 「縮瞳と画像特徴量の関係」をまず重回帰で確認するタブを追加
 #  - 輝度のみ vs (コントラスト + シャープネス + 交互作用あり) を比較
 #  - 特徴量グループ（all / all_area / all_pupil / ROI別）ごとに R^2, p値, train/test散布図を出す
-#  - モデル1は LazyPredict で自動選択（任意）し、可能なら Optuna でチューニング（任意）
+#
+# 追加（今回の要望）:
+#  - Model1 に「重回帰（手動式）」を追加（Stage1）
+#  - 重回帰に使う項を手動で決める（ベース特徴量＋ 交互作用項/二乗項/平方根項 を用意）
+#    ※ Stage2 は「ベース特徴量」を予測。重回帰の多項は推定ベース特徴量から組み立てて予測に使う。
 #
 # Fix/Improve:
 #  - 学習結果を session_state に保持（切り替えで再学習しない）
@@ -77,8 +81,6 @@ import warnings as _warnings
 
 def cuda_available():
     try:
-        # import cupy as cp
-        # return cp.cuda.runtime.getDeviceCount() > 0
         return Exception
     except Exception:
         return False
@@ -90,7 +92,6 @@ _warnings.filterwarnings(
 )
 
 if cuda_available():
-    # import features_pupil_gpu as fp
     import features_pupil as fp
     USING_GPU = False  # 一旦無効化
     print("[INFO] Using GPU version (features_pupil_gpu)")
@@ -523,19 +524,6 @@ def image_basic_stats(pil_img: Image.Image) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-# def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series) -> pd.Series:
-#     x = pd.Series(index=selected, dtype=float)
-#     miss = []
-#     for f in selected:
-#         if f in feats:
-#             x[f] = float(feats[f])
-#         else:
-#             x[f] = np.nan
-#             miss.append(f)
-#     if miss:
-#         st.warning(f"特徴量欠損 {len(miss)}/{len(selected)}: {miss[:8]}{' ...' if len(miss)>8 else ''} → 学習データ平均で補完")
-#     return x.fillna(img_feature_means.reindex(selected)).fillna(0.0)
-
 def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series, tag: str = "") -> pd.Series:
     feats = feats or {}
     x = pd.Series(index=selected, dtype=float)
@@ -557,18 +545,12 @@ def build_x_from_feats(feats: dict, selected: list, img_feature_means: pd.Series
     return x
 
 
-# def predict_stage1_from_x(m1, x: pd.Series, stage1_task: str) -> dict:
-#     X = x.to_frame().T  # ★DataFrameに統一（列名付き）
-#     X = x.values.reshape(1, -1)
-#     if stage1_task == "reg":
-#         return {"pupil": float(m1.predict(X)[0]), "p_shrink": np.nan}
-#     else:
-#         return {"pupil": np.nan, "p_shrink": float(m1.predict_proba(X)[:, 1][0])}
 
+# ============================================================
+# Stage1 prediction helpers (single/batch)  ※列順事故を防ぐ
+# ============================================================
 def predict_stage1_from_x(m1, x: pd.Series, stage1_task: str) -> dict:
     X = x.to_frame().T  # 1行DataFrame（列名あり）
-
-    # 学習時の列順に揃える（これが超重要）
     if hasattr(m1, "feature_names_in_"):
         X = X.reindex(columns=list(m1.feature_names_in_), fill_value=0.0)
 
@@ -578,6 +560,13 @@ def predict_stage1_from_x(m1, x: pd.Series, stage1_task: str) -> dict:
         proba = m1.predict_proba(X)
         return {"pupil": np.nan, "p_shrink": float(proba[:, 1][0])}
 
+def safe_auc(y_true, y_prob) -> float:
+    try:
+        if len(np.unique(y_true)) < 2:
+            return np.nan
+        return float(roc_auc_score(y_true, y_prob))
+    except Exception:
+        return np.nan
 
 # ============================================================
 # 18 patterns / param ranges
@@ -645,16 +634,8 @@ def make_y_class(df: pd.DataFrame, pupil_col: str, group_col: str | None, mode: 
     else:
         return (y <= float(np.nanmedian(y.values))).astype(int)
 
-def safe_auc(y_true, y_prob) -> float:
-    try:
-        if len(np.unique(y_true)) < 2:
-            return np.nan
-        return float(roc_auc_score(y_true, y_prob))
-    except Exception:
-        return np.nan
-
 # ============================================================
-# Models & search
+# Models & search (RF/XGB)
 # ============================================================
 RF_PARAM_GRID_STAGE1 = {
     "n_estimators": [50, 75, 100, 125, 150],
@@ -734,12 +715,6 @@ def _get_splitter(groups):
     splitter = KFold(n_splits=5, shuffle=True, random_state=42)
     return splitter, False
 
-def score_stage1(task: str, y_true, y_pred_or_prob) -> float:
-    if task == "reg":
-        return float(r2_score(y_true, y_pred_or_prob))
-    else:
-        return safe_auc(y_true, y_pred_or_prob)
-
 def _safe_fit_with_weights(model, X, y, w):
     """
     sample_weight対応してないモデルが混ざることを想定して安全にfitする
@@ -783,8 +758,8 @@ def grid_search_stage1_manual(X, y, w, groups, model_type, task: str):
                 _safe_fit_with_weights(m, X_tr, y_tr, w_tr)
                 tr_prob = m.predict_proba(X_tr)[:, 1]
                 te_prob = m.predict_proba(X_te)[:, 1]
-                tr_scores.append(score_stage1(task, y_tr, tr_prob))
-                te_scores.append(score_stage1(task, y_te, te_prob))
+                tr_scores.append(safe_auc(y_tr, tr_prob))
+                te_scores.append(safe_auc(y_te, te_prob))
 
         mean_te = float(np.nanmean(te_scores))
         if mean_te > best_score:
@@ -829,8 +804,8 @@ def train_stage1_fixed_params_generic(X, y, w, groups, model, task: str, model_n
             tr_scores.append(r2_score(y_tr, m.predict(X_tr)))
             te_scores.append(r2_score(y_te, m.predict(X_te)))
         else:
-            tr_scores.append(score_stage1(task, y_tr, m.predict_proba(X_tr)[:, 1]))
-            te_scores.append(score_stage1(task, y_te, m.predict_proba(X_te)[:, 1]))
+            tr_scores.append(safe_auc(y_tr, m.predict_proba(X_tr)[:, 1]))
+            te_scores.append(safe_auc(y_te, m.predict_proba(X_te)[:, 1]))
 
         prog.progress((i + 1) / len(splits), text=f"Stage1 training ({model_name})... ({i+1}/{len(splits)})")
 
@@ -967,45 +942,32 @@ def knee_point_on_front(
       - x_col: 通常は画質Q
       - x_min: 指定すると x_col >= x_min の点だけで選ぶ（満たす点が無ければ None）
     """
-    # --- dropna & optional threshold ---
     f = front.dropna(subset=[x_col, y_col]).copy()
     if x_min is not None:
         f = f[f[x_col].astype(float) >= float(x_min)].copy()
         if len(f) == 0:
             return None
 
-    # X軸（画質）でソート
     f = f.sort_values(x_col, ascending=True).reset_index(drop=True)
     x = f[x_col].values.astype(float)
     y = f[y_col].values.astype(float)
 
-    # データが2点以下の場合
     if len(f) <= 2:
-        if maximize_y:
-            idx = int(np.nanargmax(y))
-        else:
-            idx = int(np.nanargmin(y))
+        idx = int(np.nanargmax(y)) if maximize_y else int(np.nanargmin(y))
         return f.iloc[idx].copy()
 
-    # --- 縮瞳/散瞳優先モード ---
     if mode == "extreme":
-        if maximize_y:
-            idx = int(np.nanargmax(y))  # P(shrink)最大
-        else:
-            idx = int(np.nanargmin(y))  # Pupil最小
+        idx = int(np.nanargmax(y)) if maximize_y else int(np.nanargmin(y))
         return f.iloc[idx].copy()
 
-    # --- バランス重視モード（knee検出） ---
     x_minv, x_maxv = np.nanmin(x), np.nanmax(x)
     y_minv, y_maxv = np.nanmin(y), np.nanmax(y)
-
     x_range = x_maxv - x_minv if (x_maxv - x_minv) > 1e-9 else 1.0
     y_range = y_maxv - y_minv if (y_maxv - y_minv) > 1e-9 else 1.0
 
     xn = (x - x_minv) / x_range
     yn = (y - y_minv) / y_range
 
-    # 小さい方が良い（Pupil）なら反転
     if not maximize_y:
         yn = 1.0 - yn
 
@@ -1013,7 +975,6 @@ def knee_point_on_front(
     p2 = np.array([xn[-1], yn[-1]])
     vec_line = p2 - p1
     vec_points = np.vstack([xn, yn]).T - p1
-
     cross_prod = vec_points[:, 0] * vec_line[1] - vec_points[:, 1] * vec_line[0]
     dist = np.abs(cross_prod)
 
@@ -1037,7 +998,7 @@ def get_state():
     return st.session_state.trained
 
 # ============================================================
-# 重回帰（構造解明）
+# 重回帰（構造解明タブ用）
 # ============================================================
 def _group_split(X, y, groups, test_size=0.2, random_state=42):
     if groups is None:
@@ -1066,8 +1027,7 @@ def run_ols_with_pvalues(X: pd.DataFrame, y: pd.Series, w: pd.Series | None = No
     if not SM_AVAILABLE:
         raise RuntimeError("statsmodels is not available")
 
-    X_ = X.copy()
-    X_ = X_.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    X_ = X.copy().replace([np.inf, -np.inf], np.nan).fillna(0.0)
     y_ = y.astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     X_ = sm.add_constant(X_, has_constant="add")
@@ -1111,25 +1071,18 @@ def regression_block(
 
     y = df_full[pupil_col].astype(float)
     Xcand = df_full[candidate_cols].copy()
-
-    # 欠損処理（軽く）
     Xcand = Xcand.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    # --- feature pick UI ---
     st.caption("重回帰で使う説明変数セットを選びます（デフォルトはキーワードで自動候補）。")
 
-    # brightness candidates
     bright_sug = [c for c in candidate_cols if "bnl" not in c.lower() and any(k in c.lower() for k in default_brightness_kw)]
     if not bright_sug:
-        # fallback: mean or luminance
         bright_sug = _suggest_by_keywords(candidate_cols, ["luma", "lumin", "mean", "y", "bl"])
     bright_cols = st.multiselect("輝度（Brightness）候補", options=candidate_cols, default=bright_sug[:1])
 
-    # contrast candidates
     cont_sug = [c for c in candidate_cols if any(k in c.lower() for k in default_contrast_kw)]
     cont_cols = st.multiselect("コントラスト（Contrast）候補", options=candidate_cols, default=cont_sug[:3])
 
-    # sharpness candidates
     sharp_sug = [c for c in candidate_cols if any(k in c.lower() for k in default_sharp_kw)]
     sharp_cols = st.multiselect("シャープネス（Sharpness）候補", options=candidate_cols, default=sharp_sug[:3])
 
@@ -1141,7 +1094,6 @@ def regression_block(
         st.warning("輝度の説明変数が0です。最低1つ選んでください。")
         return
 
-    # --- split ---
     tr_idx, te_idx = _group_split(Xcand, y, groups, test_size=float(test_size), random_state=42)
     X_tr_all = Xcand.loc[tr_idx].copy()
     X_te_all = Xcand.loc[te_idx].copy()
@@ -1157,15 +1109,12 @@ def regression_block(
         Xte_s = pd.DataFrame(scaler.transform(Xte), index=Xte.index, columns=Xte.columns)
         return Xtr_s, Xte_s
 
-    # --- Model A: brightness only ---
     Xa_tr = X_tr_all[bright_cols].copy()
     Xa_te = X_te_all[bright_cols].copy()
     Xa_tr, Xa_te = _prep(Xa_tr, Xa_te)
 
     resA, coefA, pA = run_ols_with_pvalues(Xa_tr, y_tr, w_tr)
 
-    # predict
-    # statsmodels expects const added similarly
     def _predict_sm(res, Xdf):
         X_ = sm.add_constant(Xdf, has_constant="add")
         return pd.Series(res.predict(X_.values), index=Xdf.index)
@@ -1175,13 +1124,11 @@ def regression_block(
     r2A_tr = float(r2_score(y_tr, yhatA_tr))
     r2A_te = float(r2_score(y_te, yhatA_te))
 
-    # --- Model B: brightness + contrast + sharpness + interactions ---
     colsB = list(dict.fromkeys(bright_cols + cont_cols + sharp_cols))
     Xb_tr = X_tr_all[colsB].copy()
     Xb_te = X_te_all[colsB].copy()
 
     if use_interactions and (len(cont_cols) + len(sharp_cols)) > 0:
-        # interactions among contrast/sharpness & with brightness
         inter1 = build_interactions(X_tr_all, cont_cols, sharp_cols, prefix="intCS")
         inter2 = build_interactions(X_tr_all, bright_cols, cont_cols + sharp_cols, prefix="intBL")
         inter1_te = build_interactions(X_te_all, cont_cols, sharp_cols, prefix="intCS")
@@ -1199,13 +1146,11 @@ def regression_block(
     r2B_tr = float(r2_score(y_tr, yhatB_tr))
     r2B_te = float(r2_score(y_te, yhatB_te))
 
-    # --- report summary ---
     st.markdown("#### 結果（R²）")
     st.write(f"Model A (Brightness only)  Train R²: **{r2A_tr:.3f}** / Test R²: **{r2A_te:.3f}**")
     st.write(f"Model B (+Contrast/+Sharpness/+Interactions)  Train R²: **{r2B_tr:.3f}** / Test R²: **{r2B_te:.3f}**")
     st.caption("p値はWLS/OLSの仮定に依存します（まず構造を見る用途として使用）。")
 
-    # coef tables
     def _coef_table(coef, pval):
         dfc = pd.concat([coef, pval], axis=1).reset_index().rename(columns={"index": "term"})
         dfc = dfc.sort_values("pval", ascending=True).reset_index(drop=True)
@@ -1217,7 +1162,6 @@ def regression_block(
     st.markdown("#### 係数とp値（Model B）")
     st.dataframe(_coef_table(coefB, pB).head(120), use_container_width=True)
 
-    # scatter
     st.markdown("#### Scatter (train/test)")
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.scatter(y_tr, yhatA_tr, alpha=0.35, label="Train (Model A)")
@@ -1240,13 +1184,215 @@ def regression_block(
     st.pyplot(fig)
 
 # ============================================================
+# Stage1: 重回帰（手動式） for Model1
+#   - Stage2は「ベース特徴量」を予測し、
+#     それを元に（交互作用/二乗/平方根）を組み立てて Stage1 に入力する
+# ============================================================
+def _sqrt_safe(x: np.ndarray) -> np.ndarray:
+    return np.sqrt(np.maximum(x, 0.0))
+
+def build_manual_terms_from_base(
+    X_base: pd.DataFrame,
+    include_linear: bool,
+    include_square: bool,
+    include_sqrt: bool,
+    interaction_pairs: list[tuple[str, str]],
+) -> pd.DataFrame:
+    """
+    X_base: columns = base features
+    出力: design matrix columns = 手動作成した項
+    """
+    out = {}
+
+    if include_linear:
+        for c in X_base.columns:
+            out[f"lin:{c}"] = X_base[c].astype(float)
+
+    if include_square:
+        for c in X_base.columns:
+            out[f"sq:{c}"] = X_base[c].astype(float) ** 2
+
+    if include_sqrt:
+        for c in X_base.columns:
+            out[f"sqrt:{c}"] = _sqrt_safe(X_base[c].astype(float).values)
+
+    # interactions
+    for a, b in interaction_pairs:
+        if (a in X_base.columns) and (b in X_base.columns) and (a != b):
+            out[f"int:{a}*{b}"] = X_base[a].astype(float) * X_base[b].astype(float)
+
+    return pd.DataFrame(out, index=X_base.index) if out else pd.DataFrame(index=X_base.index)
+
+def parse_bases_from_term(term: str) -> list[str]:
+    # "lin:feat" / "sq:feat" / "sqrt:feat" / "int:a*b"
+    if term.startswith(("lin:", "sq:", "sqrt:")):
+        return [term.split(":", 1)[1]]
+    if term.startswith("int:") and "*" in term:
+        rhs = term.split(":", 1)[1]
+        a, b = rhs.split("*", 1)
+        return [a, b]
+    return []
+
+class Stage1ManualOLS:
+    """
+    statsmodels OLS/WLS wrapper (regression only)
+    """
+    def __init__(
+        self,
+        base_features: list[str],
+        use_terms: list[str],
+        standardize_X: bool = True,
+        use_WLS: bool = True,
+    ):
+        self.base_features = list(base_features)
+        self.use_terms = list(use_terms)
+        self.standardize_X = bool(standardize_X)
+        self.use_WLS = bool(use_WLS)
+
+        self.scaler = None
+        self.res_ = None
+        self.params_ = None
+        self.feature_names_in_ = None  # sklearn互換的に
+        self.is_manual_ols_ = True
+
+    def _make_design(self, X_base_df: pd.DataFrame) -> pd.DataFrame:
+        # まず全部作る → use_termsで絞る
+        # interactionは use_terms を見て必要なペアだけ作る（無駄を減らす）
+        bases = self.base_features
+        Xb = X_base_df.reindex(columns=bases).copy()
+        Xb = Xb.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        # 必要なinteraction pairsを use_terms から抽出
+        pairs = []
+        for t in self.use_terms:
+            if t.startswith("int:") and "*" in t:
+                rhs = t.split(":", 1)[1]
+                a, b = rhs.split("*", 1)
+                pairs.append((a, b))
+
+        # どの種類を入れるかは use_terms を見て判定
+        include_linear = any(t.startswith("lin:") for t in self.use_terms)
+        include_square = any(t.startswith("sq:") for t in self.use_terms)
+        include_sqrt = any(t.startswith("sqrt:") for t in self.use_terms)
+
+        Xd_all = build_manual_terms_from_base(
+            X_base=Xb,
+            include_linear=include_linear,
+            include_square=include_square,
+            include_sqrt=include_sqrt,
+            interaction_pairs=pairs,
+        )
+
+        # 絞り込み（順序を固定）
+        Xd = Xd_all.reindex(columns=self.use_terms).copy()
+        Xd = Xd.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        return Xd
+
+    def fit(self, X_base_df: pd.DataFrame, y: pd.Series, sample_weight: pd.Series | None = None):
+        if not SM_AVAILABLE:
+            raise RuntimeError("statsmodels が必要です（pip install statsmodels）")
+
+        Xd = self._make_design(X_base_df)
+        y_ = y.astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        if self.standardize_X:
+            self.scaler = StandardScaler()
+            Xs = pd.DataFrame(self.scaler.fit_transform(Xd), index=Xd.index, columns=Xd.columns)
+        else:
+            self.scaler = None
+            Xs = Xd
+
+        self.feature_names_in_ = np.array(list(Xs.columns), dtype=object)
+
+        Xs_ = sm.add_constant(Xs, has_constant="add")
+
+        if self.use_WLS and (sample_weight is not None):
+            ww = sample_weight.astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0).values
+            model = sm.WLS(y_.values, Xs_.values, weights=ww)
+        else:
+            model = sm.OLS(y_.values, Xs_.values)
+
+        self.res_ = model.fit()
+        self.params_ = pd.Series(self.res_.params, index=Xs_.columns, name="coef")
+        return self
+
+    def predict(self, X_base_df: pd.DataFrame) -> np.ndarray:
+        Xd = self._make_design(X_base_df)
+        if self.standardize_X and (self.scaler is not None):
+            Xs = pd.DataFrame(self.scaler.transform(Xd), index=Xd.index, columns=Xd.columns)
+        else:
+            Xs = Xd
+
+        # 学習時列順に合わせる
+        Xs = Xs.reindex(columns=list(self.feature_names_in_), fill_value=0.0)
+        Xs_ = sm.add_constant(Xs, has_constant="add")
+        return np.asarray(self.res_.predict(Xs_.values), dtype=float)
+
+def cv_manual_ols(
+    model_cfg: dict,
+    X_base: pd.DataFrame,
+    y: pd.Series,
+    w: pd.Series | None,
+    groups: pd.Series | None,
+):
+    splitter, is_group = _get_splitter(groups)
+    splits = list(splitter.split(X_base, y, groups)) if is_group else list(splitter.split(X_base, y))
+
+    tr_scores, te_scores = [], []
+    prog = st.progress(0.0, text="Stage1 (Manual OLS) CV...")
+
+    for i, (tr_idx, te_idx) in enumerate(splits):
+        X_tr, X_te = X_base.iloc[tr_idx], X_base.iloc[te_idx]
+        y_tr, y_te = y.iloc[tr_idx], y.iloc[te_idx]
+        w_tr = w.iloc[tr_idx] if w is not None else None
+
+        m = Stage1ManualOLS(**model_cfg)
+        m.fit(X_tr, y_tr, sample_weight=w_tr)
+        tr_scores.append(r2_score(y_tr, m.predict(X_tr)))
+        te_scores.append(r2_score(y_te, m.predict(X_te)))
+
+        prog.progress((i + 1) / len(splits), text=f"Stage1 (Manual OLS) CV... ({i+1}/{len(splits)})")
+
+    # final fit
+    m_final = Stage1ManualOLS(**model_cfg)
+    m_final.fit(X_base, y, sample_weight=w if model_cfg.get("use_WLS", True) else None)
+
+    prog.progress(1.0, text="Stage1 (Manual OLS) done")
+    cv = {
+        "mean_train": float(np.nanmean(tr_scores)),
+        "std_train": float(np.nanstd(tr_scores)),
+        "mean_test": float(np.nanmean(te_scores)),
+        "std_test": float(np.nanstd(te_scores)),
+        "sample_weight_used": bool(model_cfg.get("use_WLS", True) and (w is not None)),
+    }
+    return m_final, cv
+
+def base_importance_from_manual_ols(m: Stage1ManualOLS) -> pd.Series:
+    """
+    手動OLSの係数から、ベース特徴量の寄与をざっくり集計：
+      importance(base) = sum(|coef(term)|) over terms that include base
+    """
+    if m is None or m.params_ is None:
+        return pd.Series(dtype=float)
+
+    coef = m.params_.copy()
+    # 定数は除外
+    coef = coef.drop(index=[c for c in coef.index if c == "const"], errors="ignore")
+
+    imp = {}
+    for term, val in coef.items():
+        bases = parse_bases_from_term(term)
+        for b in bases:
+            imp[b] = imp.get(b, 0.0) + float(abs(val))
+    return pd.Series(imp).sort_values(ascending=False)
+
+# ============================================================
 # LazyPredict (Stage1選択) + Optuna (任意)
 # ============================================================
 def lazypredict_select_model(X: pd.DataFrame, y: pd.Series, task: str, groups: pd.Series | None):
     if not LAZY_AVAILABLE:
         raise RuntimeError("lazypredict not available")
 
-    # group-aware split（1回）
     tr_idx, te_idx = _group_split(X, y, groups, test_size=0.2, random_state=42)
     X_tr, X_te = X.loc[tr_idx], X.loc[te_idx]
     y_tr, y_te = y.loc[tr_idx], y.loc[te_idx]
@@ -1254,7 +1400,6 @@ def lazypredict_select_model(X: pd.DataFrame, y: pd.Series, task: str, groups: p
     if task == "reg":
         lazy = LazyRegressor(verbose=0, ignore_warnings=True, custom_metric=None, predictions=True)
         models_df, preds = lazy.fit(X_tr, X_te, y_tr, y_te)
-        # best by R2
         if "R-Squared" in models_df.columns:
             best_name = models_df["R-Squared"].idxmax()
         elif "R2" in models_df.columns:
@@ -1266,7 +1411,6 @@ def lazypredict_select_model(X: pd.DataFrame, y: pd.Series, task: str, groups: p
     else:
         lazy = LazyClassifier(verbose=0, ignore_warnings=True, custom_metric=None, predictions=True)
         models_df, preds = lazy.fit(X_tr, X_te, y_tr, y_te)
-        # best by ROC AUC if exists else Accuracy
         if "ROC AUC" in models_df.columns:
             best_name = models_df["ROC AUC"].idxmax()
         elif "Accuracy" in models_df.columns:
@@ -1289,11 +1433,9 @@ def optuna_tune_stage1(
         raise RuntimeError("optuna not available")
 
     model_name = base_model.__class__.__name__.lower()
-
     splitter, is_group = _get_splitter(groups)
 
     def objective(trial):
-        # create tuned model
         if "randomforest" in model_name:
             if task == "reg":
                 params = dict(
@@ -1339,10 +1481,8 @@ def optuna_tune_stage1(
                     subsample=subsample, colsample_bytree=colsample, reg_lambda=reg_lambda,
                 )
         else:
-            # unknown model: no tuning
             m = base_model
 
-        # CV score
         scores = []
         split_iter = splitter.split(X, y, groups) if is_group else splitter.split(X, y)
         for tr_idx, te_idx in split_iter:
@@ -1350,14 +1490,13 @@ def optuna_tune_stage1(
             y_tr, y_te = y.iloc[tr_idx], y.iloc[te_idx]
             w_tr = w.iloc[tr_idx] if w is not None else None
 
-            used_w = False
             try:
                 m_ = m.__class__(**m.get_params())
             except Exception:
                 m_ = m
 
             if w_tr is not None:
-                used_w = _safe_fit_with_weights(m_, X_tr, y_tr, w_tr)
+                _safe_fit_with_weights(m_, X_tr, y_tr, w_tr)
             else:
                 m_.fit(X_tr, y_tr)
 
@@ -1370,8 +1509,7 @@ def optuna_tune_stage1(
 
         return float(np.nanmean(scores))
 
-    direction = "maximize"
-    study = optuna.create_study(direction=direction)
+    study = optuna.create_study(direction="maximize")
     prog = st.progress(0.0, text="Optuna tuning...")
 
     def cb(study, trial):
@@ -1382,7 +1520,6 @@ def optuna_tune_stage1(
     best_params = study.best_params
     st.caption(f"Optuna best score: {study.best_value:.4f}")
 
-    # build final model with best params if recognized
     if "randomforest" in model_name:
         if task == "reg":
             final = RandomForestRegressor(**{**best_params, "random_state": 42, "n_jobs": -1})
@@ -1437,9 +1574,11 @@ def main():
         return
 
     df_full = load_and_parse_data(uploaded_file)
+
     # ===== bnL を完全に除去（学習に入れない）=====
     drop_cols = [c for c in df_full.columns if "bnL" in c]
     df_full = df_full.drop(columns=drop_cols, errors="ignore")
+
     fp_df = df_fingerprint(df_full)
 
     # Exclude subjects
@@ -1511,7 +1650,6 @@ def main():
                 "ROI別（center/parafovea/periphery）": "ROI",
             }[feat_choice_reg]
 
-            # Candidate columns (同じロジック)
             if feat_group_reg == "all":
                 candidate_cols_reg = [c for c in num_cols if c.startswith("all_")
                                       and not c.startswith("all_area_") and not c.startswith("all_pupil_")
@@ -1546,7 +1684,6 @@ def main():
                 if not SM_AVAILABLE:
                     st.warning("statsmodels が必要です。pip install statsmodels")
                 else:
-                    # auto pick: brightness=最初のbL系、contrast/sharp=キーワード上位
                     rows = []
                     for fg_label, fg in [
                         ("all", "all"),
@@ -1571,7 +1708,6 @@ def main():
                         if len(cand_cols) < 3:
                             continue
 
-                        # auto choose
                         bright = [c for c in cand_cols if "bnl" not in c.lower() and "bl" in c.lower()]
                         if not bright:
                             bright = _suggest_by_keywords(cand_cols, ["luma", "lumin", "mean", "y", "bl"])
@@ -1588,7 +1724,6 @@ def main():
                         y_te = y.loc[te_idx]
                         w_tr = sample_weights.loc[tr_idx] if sample_weights is not None else None
 
-                        # A
                         Xa_tr = Xcand.loc[tr_idx, bright].copy()
                         Xa_te = Xcand.loc[te_idx, bright].copy()
                         sc = StandardScaler()
@@ -1599,7 +1734,6 @@ def main():
                         yhatA_te = pd.Series(resA.predict(sm.add_constant(Xa_te, has_constant="add").values), index=Xa_te.index)
                         r2A_te = float(r2_score(y_te, yhatA_te))
 
-                        # B
                         colsB = list(dict.fromkeys(bright + cont + sharp))
                         Xb_tr = Xcand.loc[tr_idx, colsB].copy()
                         Xb_te = Xcand.loc[te_idx, colsB].copy()
@@ -1646,7 +1780,6 @@ def main():
         )
         stage1_task = "reg" if "回帰" in stage1_task_label else "clf"
 
-        # 分類時のラベル設定
         if stage1_task == "clf":
             st.caption("分類は「縮瞳側=1 / 非縮瞳側=0」の二値を作って学習します（被験者内中央値が推奨）。")
             y_mode = st.radio(
@@ -1709,27 +1842,138 @@ def main():
             st.info(f"top_k を {top_k} に固定しました（候補が少ないためスライダーを出せません）。")
         else:
             default_k = min(10, max_k)
-            top_k = st.slider("Top-k（z の計算に使用）", min_k, max_k, default_k)
+            top_k = st.slider("Top-k（z の計算/Stage2ターゲットに使用）", min_k, max_k, default_k)
 
         n_trials_per_pattern = st.slider("パターンごとの試行回数（高速探索）", 200, 5000, 1000, 200)
 
-        # --- Stage1 model selection: Manual vs LazyPredict ---
+        # --- Stage1 model selection: Manual vs LazyPredict vs Manual OLS ---
         st.markdown("### 🤖 Stage1 モデル選択")
         model1_mode = st.radio(
             "モデル1の決め方",
-            ["手動（RF/XGB）", "自動（LazyPredict）"],
+            ["手動（RF/XGB）", "自動（LazyPredict）", "重回帰（手動式）"],
             index=0,
             horizontal=True,
-            help="自動は lazypredict が必要です。"
+            help="重回帰（手動式）は、ベース特徴量＋(交互作用/二乗/平方根)の項を手動で選びます（回帰のみ）。"
         )
 
+        # ---- Manual OLS UI (only for regression) ----
+        ols_base_feats = []
+        ols_use_terms = []
+        ols_cfg = None
+
+        if model1_mode == "重回帰（手動式）":
+            if stage1_task != "reg":
+                st.error("重回帰（手動式）は Stage1=回帰 のときのみ使えます。分類にしたいなら RF/XGB/Lazy を選んでください。")
+                st.stop()
+            if not SM_AVAILABLE:
+                st.error("statsmodels が必要です（pip install statsmodels）。")
+                st.stop()
+
+            st.markdown("#### 🧩 重回帰（手動式）: ベース特徴量と項を選ぶ")
+            # ベース特徴量の推奨候補
+            sug_b = [c for c in candidate_cols if ("bnl" not in c.lower()) and ("bl" in c.lower())]
+            if not sug_b:
+                sug_b = _suggest_by_keywords(candidate_cols, ["luma", "lumin", "mean", "y", "bl"])
+            sug_c = _suggest_by_keywords(candidate_cols, ["contrast", "rms_contrast", "weber", "michelson", "glcm_contrast"])
+            sug_s = _suggest_by_keywords(candidate_cols, ["sharp", "lap", "tenengrad", "acut", "hf", "highfreq", "grad_entropy"])
+            default_base = list(dict.fromkeys((sug_b[:1] + sug_c[:2] + sug_s[:2])))[:10]
+
+            ols_base_feats = st.multiselect(
+                "ベース特徴量（Stage2が予測し、重回帰の項を作る元になります）",
+                options=candidate_cols,
+                default=default_base
+            )
+            if len(ols_base_feats) < 1:
+                st.warning("ベース特徴量が0です。最低1つ選んでください。")
+                st.stop()
+
+            colA, colB, colC = st.columns(3)
+            with colA:
+                inc_lin = st.checkbox("線形項（x）を用意", value=True)
+            with colB:
+                inc_sq = st.checkbox("二乗項（x^2）を用意", value=True)
+            with colC:
+                inc_sqrt = st.checkbox("平方根項（sqrt(x)）を用意", value=False)
+
+            st.caption("交互作用は 'int:a*b' 形式で作ります（順序違いは別項扱い）。")
+            use_all_pairs = st.checkbox("交互作用は『全ペア（ベース特徴量の組合せ）』を用意", value=True)
+            manual_pairs = []
+            if use_all_pairs:
+                pairs = []
+                for i in range(len(ols_base_feats)):
+                    for j in range(i + 1, len(ols_base_feats)):
+                        pairs.append((ols_base_feats[i], ols_base_feats[j]))
+                manual_pairs = pairs
+            else:
+                # 手動でペアを選ぶ
+                pair_strs = []
+                for i in range(len(ols_base_feats)):
+                    for j in range(i + 1, len(ols_base_feats)):
+                        pair_strs.append(f"{ols_base_feats[i]} * {ols_base_feats[j]}")
+                chosen = st.multiselect("交互作用ペア（手動）", options=pair_strs, default=pair_strs[: min(5, len(pair_strs))])
+                pairs = []
+                for s in chosen:
+                    a, b = s.split(" * ", 1)
+                    pairs.append((a, b))
+                manual_pairs = pairs
+
+            # 「用意される項一覧」を一旦生成
+            Xtmp = df_full[ols_base_feats].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            all_terms_df = build_manual_terms_from_base(
+                X_base=Xtmp,
+                include_linear=inc_lin,
+                include_square=inc_sq,
+                include_sqrt=inc_sqrt,
+                interaction_pairs=manual_pairs,
+            )
+            all_terms = list(all_terms_df.columns)
+
+            st.caption(f"用意される項数: {len(all_terms)}（この中から実際に使う項を選びます）")
+            # デフォルト：線形は全部、二乗はbLだけ、交互作用はコントラスト×シャープネスっぽいものを少し
+            default_terms = []
+            if inc_lin:
+                default_terms += [t for t in all_terms if t.startswith("lin:")]
+            if inc_sq:
+                default_terms += [t for t in all_terms if t.startswith("sq:")][:min(3, len(all_terms))]
+            if len(manual_pairs) > 0:
+                default_terms += [t for t in all_terms if t.startswith("int:")][:min(3, len(all_terms))]
+
+            ols_use_terms = st.multiselect(
+                "実際に重回帰に入れる項（手動）",
+                options=all_terms,
+                default=list(dict.fromkeys(default_terms))[: min(20, len(all_terms))]
+            )
+            if len(ols_use_terms) < 1:
+                st.warning("重回帰に入れる項が0です。最低1つ選んでください。")
+                st.stop()
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                ols_standardize = st.checkbox("重回帰: Xを標準化（推奨）", value=True)
+            with col2:
+                ols_use_wls = st.checkbox("重回帰: WLS（sample_weight）を使う", value=True)
+            with col3:
+                st.write("")
+
+            ols_cfg = dict(
+                base_features=ols_base_feats,
+                use_terms=ols_use_terms,
+                standardize_X=ols_standardize,
+                use_WLS=ols_use_wls,
+            )
+
+            with st.expander("（確認）選んだ項一覧"):
+                st.write(ols_use_terms)
+
+        # ---- RF/XGB / Lazy UI ----
         if model1_mode == "手動（RF/XGB）":
             m1_label = st.radio("モデル1（特徴量 → 出力）", ["ランダムフォレスト", "XGBoost"], index=0, horizontal=True)
             model1_type = "RandomForest" if m1_label == "ランダムフォレスト" else "XGBoost"
             use_grid1 = st.checkbox("Stage1 GridSearch（ハイパラ探索）", value=True)
             use_optuna1 = False
             optuna_trials = 0
-        else:
+
+        elif model1_mode == "自動（LazyPredict）":
             model1_type = "AUTO_LAZY"
             use_grid1 = False
             use_optuna1 = st.checkbox("Optunaでチューニング（任意）", value=False)
@@ -1740,6 +1984,14 @@ def main():
                 st.warning("Optuna がありません。`pip install optuna` を入れてください。")
                 use_optuna1 = False
                 optuna_trials = 0
+            model1_type = "AUTO_LAZY"
+
+        else:
+            # manual OLS mode
+            model1_type = "MANUAL_OLS"
+            use_grid1 = False
+            use_optuna1 = False
+            optuna_trials = 0
 
         m2_label = st.radio("モデル2（加工パラメータ+orig → 特徴量）", ["ランダムフォレスト", "XGBoost"], index=0, horizontal=True)
         model2_type = "RandomForest" if m2_label == "ランダムフォレスト" else "XGBoost"
@@ -1772,7 +2024,6 @@ def main():
         )
         quality_metric_key = "SSIM" if "SSIM" in quality_metric else "PSNR"
 
-        # PSNR 正規化レンジ（Jに使う）
         if quality_metric_key == "PSNR":
             psnr_norm_min = st.slider("PSNR 正規化下限（J用）", 0.0, 40.0, 20.0, 0.5)
             psnr_norm_max = st.slider("PSNR 正規化上限（J用）", 20.0, 80.0, 60.0, 0.5)
@@ -1791,8 +2042,7 @@ def main():
         )
         quality_mode = {"制約": "constraint", "合成": "composite"}.get(qm_choice[:2], "pareto")
 
-        # ★★★ パレートモード用の追加設定（事前選択） ★★★
-        pareto_selection_mode = "knee"  # デフォルト
+        pareto_selection_mode = "knee"
         if quality_mode == "pareto":
             st.markdown("#### 🎯 パレート選抜の方針")
             pareto_mode_choice = st.radio(
@@ -1800,11 +2050,9 @@ def main():
                 ["バランス重視 (屈曲点)", "縮瞳/散瞳優先 (効果最大)"],
                 index=0,
                 horizontal=True,
-                help="バランス重視：画質と効果のトレードオフが最適な点 / 縮瞳/散瞳優先：画質を多少犠牲にしても効果が最大の点"
             )
             pareto_selection_mode = "knee" if "バランス" in pareto_mode_choice else "extreme"
 
-        # 閾値（SSIM/PSNRで切替）
         if quality_metric_key == "SSIM":
             q_th = st.slider("SSIM(Luma) の閾値", 0.2, 1.0, 0.3, 0.01)
         else:
@@ -1813,7 +2061,6 @@ def main():
         hf_th = st.slider("HF_ratio の上限（1.0=同等、増えるほど高周波が増加）", 1.0, 10.0, 2.0, 0.1)
         max_candidates_for_quality = st.slider("画質/HF を評価する候補数", 100, 5000, 1000, 100)
 
-        # mean(luma) 制約
         st.markdown("#### 平均輝度（mean Luma(bL)）制約")
         luma_mode = st.radio(
             "mean(luma) をどれくらい固定する？",
@@ -1829,10 +2076,10 @@ def main():
         else:
             eps_luma = 1e9
 
-        alpha = st.number_input("alpha", value=1.0, step=0.1)
-        beta  = st.number_input("beta（画質ペナルティ）", value=1.0, step=0.1)
-        gamma = st.number_input("gamma（HF ペナルティ）", value=0.5, step=0.1)
-        lambda_luma = st.number_input("lambda（meanLuma ペナルティ）", value=1.0, step=0.1)
+        alpha = st.number_input("alpha（効果）", value=1.0, step=0.1)
+        beta  = st.number_input("beta（画質）", value=1.0, step=0.1)
+        gamma = st.number_input("gamma（HFペナルティ）", value=0.5, step=0.1)
+        lambda_luma = st.number_input("lambda（meanLumaペナルティ）", value=1.0, step=0.1)
 
         # Image input
         st.subheader("新規画像入力（品質評価 / A-B-C 表示用）")
@@ -1855,29 +2102,68 @@ def main():
         state = get_state()
 
         def train_key():
-            return (fp_df, pupil_col, feat_group, top_k,
-                    model1_mode, model1_type, model2_type,
-                    use_grid2, bool(groups is not None),
-                    stage1_task, y_class_mode,
-                    use_optuna1, int(optuna_trials))
+            # OLS設定は key に入れる（同じ設定なら再学習しない）
+            ols_key = None
+            if model1_mode == "重回帰（手動式）":
+                ols_key = (
+                    tuple(ols_base_feats),
+                    tuple(ols_use_terms),
+                    bool(ols_cfg["standardize_X"]),
+                    bool(ols_cfg["use_WLS"]),
+                )
+            return (
+                fp_df, pupil_col, feat_group, top_k,
+                model1_mode, model1_type, model2_type,
+                use_grid2, bool(groups is not None),
+                stage1_task, y_class_mode,
+                use_optuna1, int(optuna_trials),
+                ols_key
+            )
 
         if st.button("🚀 学習（Model1 & Model2）"):
             key = train_key()
             with st.spinner("学習中..."):
                 # ---- Stage1 data ----
-                X_all = df_full[candidate_cols].copy()
+                X_all = df_full[candidate_cols].copy().replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
                 if stage1_task == "reg":
-                    y1 = df_full[pupil_col].copy()
+                    y1 = df_full[pupil_col].astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
                 else:
                     y1 = make_y_class(df_full, pupil_col=pupil_col, group_col=group_col, mode=y_class_mode)
 
-                # ---- Stage1 training (manual vs lazy) ----
                 best_p1 = {}
                 lazy_report = None
                 lazy_best_name = None
+                cv1_full = {"mean_train": np.nan, "std_train": np.nan, "mean_test": np.nan, "std_test": np.nan, "sample_weight_used": np.nan}
 
-                if model1_mode == "自動（LazyPredict）":
+                # ========== Stage1 training ==========
+                if model1_mode == "重回帰（手動式）":
+                    # Stage2ターゲットは「ベース特徴量」
+                    selected = list(ols_base_feats)
+
+                    # Fit manual OLS
+                    model_cfg = dict(
+                        base_features=ols_cfg["base_features"],
+                        use_terms=ols_cfg["use_terms"],
+                        standardize_X=ols_cfg["standardize_X"],
+                        use_WLS=ols_cfg["use_WLS"],
+                    )
+                    X_base = df_full[selected].copy().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                    m1_full, cv1_sel = cv_manual_ols(model_cfg, X_base, y1, sample_weights, groups)
+                    m1_sel = m1_full  # 同一
+
+                    # importance: 係数集計
+                    imp_base = base_importance_from_manual_ols(m1_sel)
+                    # 欠けがあれば0埋め
+                    imp_series = pd.Series({f: float(imp_base.get(f, 0.0)) for f in selected})
+                    imp_df = pd.DataFrame({"feature": selected, "importance": imp_series.values}).sort_values(
+                        "importance", ascending=False
+                    ).reset_index(drop=True)
+
+                    best_p1 = {"manual_ols": True, "n_terms": len(ols_use_terms)}
+                    cv1_full = cv1_sel
+
+                elif model1_mode == "自動（LazyPredict）":
                     if not LAZY_AVAILABLE:
                         st.error("LazyPredict が見つかりません。pip install lazypredict")
                         st.stop()
@@ -1889,7 +2175,6 @@ def main():
                         st.success(f"LazyPredict best: {lazy_best_name}")
                         st.dataframe(lazy_df.head(25), use_container_width=True)
 
-                    # Optuna tune (optional)
                     m1_full = lazy_best_model
                     if use_optuna1 and OPTUNA_AVAILABLE:
                         st.info("Optuna tuning...")
@@ -1901,14 +2186,15 @@ def main():
                             best_p1 = best_params_opt
                         except Exception as e:
                             st.warning(f"Optuna tuning failed: {e} （チューニングなしで続行）")
-                    # CV eval on selected top-k later (generic)
-                    cv1_full = {"mean_train": np.nan, "std_train": np.nan, "mean_test": np.nan, "std_test": np.nan, "sample_weight_used": np.nan}
 
-                    # importance fallback
                     imp = getattr(m1_full, "feature_importances_", None)
                     if imp is None:
-                        # 重要度がないモデルの場合：相関の絶対値で代用
-                        imp = np.array([abs(df_full[c].corr(df_full[pupil_col].astype(float))) for c in candidate_cols], dtype=float)
+                        # 重要度がないモデル：相関絶対値で代用
+                        if stage1_task == "reg":
+                            yy = df_full[pupil_col].astype(float)
+                        else:
+                            yy = df_full[pupil_col].astype(float)  # z用は連続
+                        imp = np.array([abs(df_full[c].corr(yy)) for c in candidate_cols], dtype=float)
                         imp = np.nan_to_num(imp, nan=0.0)
 
                     imp_df = pd.DataFrame({"feature": candidate_cols, "importance": imp}).sort_values(
@@ -1917,8 +2203,7 @@ def main():
                     selected = imp_df["feature"].head(top_k).tolist()
 
                     # retrain on selected
-                    X_sel = df_full[selected].copy()
-                    # clone model for selected training
+                    X_sel = df_full[selected].copy().replace([np.inf, -np.inf], np.nan).fillna(0.0)
                     try:
                         import sklearn.base
                         m1_sel = sklearn.base.clone(m1_full)
@@ -1951,22 +2236,28 @@ def main():
                     ).reset_index(drop=True)
                     selected = imp_df["feature"].head(top_k).tolist()
 
-                    # retrain on selected
-                    X_sel = df_full[selected].copy()
+                    X_sel = df_full[selected].copy().replace([np.inf, -np.inf], np.nan).fillna(0.0)
                     m1_sel = create_stage1_model_manual(model1_type, best_p1, task=stage1_task)
                     m1_sel, cv1_sel = train_stage1_fixed_params_generic(
                         X_sel, y1, sample_weights, groups, m1_sel, task=stage1_task, model_name=model1_type
                     )
 
-                # z weights: importance * sign(corr)
-                imp_sel = getattr(m1_sel, "feature_importances_", np.ones(len(selected), dtype=float))
+                # ========== z weights（ベース特徴量に対して計算）==========
+                # selected は Stage2ターゲット（ベース特徴量）
+                if model1_mode == "重回帰（手動式）":
+                    imp_sel = np.array([float(imp_df.set_index("feature").loc[f, "importance"]) if f in imp_df["feature"].values else 0.0 for f in selected])
+                else:
+                    imp_sel = getattr(m1_sel, "feature_importances_", np.ones(len(selected), dtype=float))
+
+                # zの符号は連続瞳孔との相関で決める（分類でも同じ）
+                y_for_corr = df_full[pupil_col].astype(float)
                 signs = []
-                y_for_corr = df_full[pupil_col].astype(float)  # zは連続瞳孔で符号付け（分類でも同じ）
                 for f in selected:
                     r = df_full[f].corr(y_for_corr)
                     s = 0.0 if (pd.isna(r) or r == 0) else sign_dir * float(np.sign(r))
                     signs.append(s)
                 signs = np.array(signs)
+
                 w_raw = imp_sel * signs
                 if np.sum(np.abs(w_raw)) > 0:
                     thr = 0.01 * np.max(np.abs(w_raw))
@@ -1989,7 +2280,7 @@ def main():
                     st.error("Stage2 の入力が空です（param / _orig が見つかりません）。")
                     st.stop()
 
-                Y2 = df_full[selected].copy()
+                Y2 = df_full[selected].copy().replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
                 if use_grid2:
                     m2, best_p2, r2_each2, r2_mean2 = grid_search_stage2(
@@ -2002,11 +2293,11 @@ def main():
 
                 state[key] = {
                     "candidate_cols": candidate_cols,
-                    "selected": selected,
+                    "selected": selected,                 # Stage2ターゲット（ベース特徴量）
                     "m1_full": m1_full,
-                    "m1_sel": m1_sel,
+                    "m1_sel": m1_sel,                     # 予測用 Stage1
                     "cv1_full": cv1_full,
-                    "cv1_sel": cv1_sel,
+                    "cv1_sel": cv1_full if model1_mode == "重回帰（手動式）" else cv1_sel,
                     "best_p1": best_p1,
                     "imp_df": imp_df,
                     "z_w": z_w,
@@ -2026,6 +2317,8 @@ def main():
                     "lazy_report": lazy_report,
                     "lazy_best_name": lazy_best_name,
                     "model1_mode": model1_mode,
+                    "model1_type": model1_type,
+                    "ols_cfg": ols_cfg,
                 }
 
             st.success("学習が完了しました（結果は session_state に保持されます）。")
@@ -2043,25 +2336,23 @@ def main():
             st.dataframe(trained["lazy_report"].head(25), use_container_width=True)
             st.caption(f"Selected model: {trained.get('lazy_best_name')}")
 
-        st.subheader("Stage1 重要度（全特徴）")
+        st.subheader("Stage1 重要度")
         st.dataframe(trained["imp_df"].head(30), use_container_width=True)
 
         st.subheader("Stage1 CV")
         cv1f = trained["cv1_full"]
         cv1s = trained["cv1_sel"]
         if trained["stage1_task"] == "reg":
-            st.write(f"全特徴の Test R2: **{cv1f['mean_test']:.3f} ± {cv1f['std_test']:.3f}**")
-            st.write(f"Top-k の Test R2: **{cv1s['mean_test']:.3f} ± {cv1s['std_test']:.3f}**")
+            st.write(f"Test R2: **{cv1s['mean_test']:.3f} ± {cv1s['std_test']:.3f}**")
         else:
-            st.write(f"全特徴の Test AUC: **{cv1f['mean_test']:.3f} ± {cv1f['std_test']:.3f}**")
-            st.write(f"Top-k の Test AUC: **{cv1s['mean_test']:.3f} ± {cv1s['std_test']:.3f}**")
+            st.write(f"Test AUC: **{cv1s['mean_test']:.3f} ± {cv1s['std_test']:.3f}**")
             st.caption("※ fold内で正例/負例が片方しかない場合、AUCは NaN になり、平均は NaN を除いて計算します。")
 
         if "sample_weight_used" in cv1s and (trained.get("model1_mode") == "自動（LazyPredict）"):
             if not cv1s["sample_weight_used"]:
                 st.warning("選ばれたモデルが sample_weight に未対応の可能性があり、学習で重みが使われていない場合があります。")
 
-        st.subheader("z の重み（Top-k）")
+        st.subheader("z の重み（Stage2ターゲット=ベース特徴量）")
         z_w_df = pd.DataFrame({"feature": trained["selected"], "weight": [trained["z_w"][f] for f in trained["selected"]]})
         st.dataframe(z_w_df, use_container_width=True)
 
@@ -2073,8 +2364,27 @@ def main():
         # ============================================================
         # Recommend
         # ============================================================
+        def stage1_predict_from_base_features(m1, X_base_df: pd.DataFrame, stage1_task: str, model1_mode: str):
+            """
+            X_base_df: columns = trained['selected'] (ベース特徴量)
+            return: np.ndarray (pred)  or prob for clf
+            """
+            if model1_mode == "重回帰（手動式）":
+                # Stage1ManualOLS only supports reg
+                return m1.predict(X_base_df)
+            else:
+                # sklearn-like
+                if hasattr(m1, "feature_names_in_"):
+                    X_in = X_base_df.reindex(columns=list(m1.feature_names_in_), fill_value=0.0)
+                else:
+                    X_in = X_base_df.copy()
+                if stage1_task == "reg":
+                    return m1.predict(X_in)
+                else:
+                    return m1.predict_proba(X_in)[:, 1]
+
         if st.button("🔍 推奨実行（高速探索 → 画質評価 → A/B/C表示）"):
-            selected = trained["selected"]
+            selected = trained["selected"]          # ベース特徴量
             m1 = trained["m1_sel"]
             m2 = trained["m2"]
             z_w = trained["z_w"]
@@ -2086,6 +2396,7 @@ def main():
             X2_cols = trained["X2_cols"]
             X2_means = trained["X2_means"]
             stage1_task = trained["stage1_task"]
+            model1_mode_tr = trained["model1_mode"]
 
             # --- compute features of new image (BEFORE) if available ---
             new_img_pil = None
@@ -2101,7 +2412,7 @@ def main():
             else:
                 feats_before = {f: df_full.loc[fallback_idx, f] for f in selected if f in df_full.columns}
 
-            # x_before for stage1 (selected features)
+            # base features vector for Stage1 (selected base features)
             x_before = pd.Series(index=selected, dtype=float)
             miss = []
             for f in selected:
@@ -2114,20 +2425,18 @@ def main():
                 st.warning(f"新規画像で取得できない特徴量があります: {miss} → 学習データ平均で補完します。")
             x_before = x_before.fillna(img_feature_means.reindex(selected)).fillna(0.0)
 
-            # z は常に表示
+            # z は常に表示（ベース特徴量で計算）
             z_before = float(np.sum([z_w[f] * ((x_before[f] - feat_mean[f]) / feat_std[f]) for f in selected]))
 
             st.subheader("加工前の予測（A）")
+            baseA_df = x_before.to_frame().T
             if stage1_task == "reg":
-                Xb = x_before.to_frame().T   # <- DataFrame (1行) にする。列名=特徴量名
-                pupil_before = float(m1.predict(x_before.values.reshape(1, -1))[0])
-                st.write(f"予測瞳孔: **{pupil_before:.3f}**")
-                st.write(f"z スコア: **{z_before:.3f}**")
+                predA = float(stage1_predict_from_base_features(m1, baseA_df, stage1_task, model1_mode_tr)[0])
+                st.write(f"予測瞳孔: **{predA:.3f}**")
             else:
-                Xb = x_before.to_frame().T
-                p_shrink_before = float(m1.predict_proba(x_before.values.reshape(1, -1))[:, 1][0])
-                st.write(f"縮瞳確率 P(shrink): **{p_shrink_before:.3f}**")
-                st.write(f"z スコア: **{z_before:.3f}**")
+                predA = float(stage1_predict_from_base_features(m1, baseA_df, stage1_task, model1_mode_tr)[0])
+                st.write(f"縮瞳確率 P(shrink): **{predA:.3f}**")
+            st.write(f"z スコア: **{z_before:.3f}**")
 
             # --- new image *_orig vector for stage2 (IMPORTANT FIX) ---
             if new_img_pil is not None and orig_cols:
@@ -2146,7 +2455,9 @@ def main():
                         orig_vec[c] = df_full.loc[fallback_idx, c]
                 orig_vec = orig_vec.fillna(X2_means.reindex(orig_cols)).fillna(0.0)
 
-            # --- Fast search ---
+            # ============================================================
+            # Fast search
+            # ============================================================
             allowed = generate_allowed_patterns()
             sim_records = []
 
