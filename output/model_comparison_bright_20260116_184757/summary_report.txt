@@ -1,0 +1,38 @@
+================================================================================
+総合比較レポート [BRIGHT]
+生成日時: 2026-01-16 18:51:47
+================================================================================
+
+
+### corrected_pupil
+--------------------------------------------------------------------------------
+ベストモデル: SVR_RBF
+R2スコア: 0.0349
+RMSE: 0.0498
+MAE: 0.0391
+
+トップ3:
+  1. SVR_RBF: R2=0.0349
+     パラメータ: {'model__C': 1.0, 'model__gamma': 0.01}
+  2. RandomForest: R2=0.0320
+     パラメータ: {'model__max_depth': 3, 'model__min_samples_leaf': 1, 'model__min_samples_split': 15, 'model__n_estimators': 100}
+  3. GradientBoosting: R2=0.0296
+     パラメータ: {'model__learning_rate': 0.01, 'model__max_depth': 3, 'model__n_estimators': 200}
+
+
+### gaze_z_inv_1000
+--------------------------------------------------------------------------------
+ベストモデル: LightGBM
+R2スコア: -0.1148
+RMSE: 123.8322
+MAE: 101.2913
+
+トップ3:
+  1. LightGBM: R2=-0.1148
+     パラメータ: {'model__learning_rate': 0.01, 'model__max_depth': 7, 'model__n_estimators': 50}
+  2. GradientBoosting: R2=-0.1158
+     パラメータ: {'model__learning_rate': 0.01, 'model__max_depth': 3, 'model__n_estimators': 50}
+  3. RandomForest: R2=-0.1204
+     パラメータ: {'model__max_depth': 3, 'model__min_samples_leaf': 2, 'model__min_samples_split': 15, 'model__n_estimators': 200}
+
+================================================================================

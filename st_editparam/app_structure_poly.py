@@ -18,7 +18,10 @@ import statsmodels.api as sm
 #  - 相対パスなら「この .py があるフォルダ」起点で探す
 # =========================
 DEFAULT_DAY_PATH = r"C:\Users\naklab\Documents\kiyota\penstone\data_pupil\final_2025_bright_pupil\final_recalculated_pupil_bcss_with_roi_global_withoutNan_with_area_pupil_with_origfeats_reduced.xlsx"
+DEFAULT_DAY_PATH = "../../../penstone/data_pupil/final_2025_bright_pupil/final_recalculated_pupil_bcss_with_roi_global_withoutNan_with_area_pupil_with_origfeats_reduced.xlsx"
 DEFAULT_NIGHT_PATH = r"C:\Users\naklab\Documents\kiyota\penstone\data_pupil\final_2025_dark_pupil\darkfinal_recalculated_pupil_bcss_roi_global_area_pupil_with_origfeats_reduced.xlsx"
+DEFAULT_NIGHT_PATH = "../../../penstone/data_pupil/final_2025_dark_pupil/darkfinal_recalculated_pupil_bcss_roi_global_area_pupil_with_origfeats_reduced.xlsx"
+
 
 
 # =========================

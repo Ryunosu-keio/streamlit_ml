@@ -1,0 +1,38 @@
+================================================================================
+総合比較レポート [BRIGHT]
+生成日時: 2026-01-16 21:10:39
+================================================================================
+
+
+### corrected_pupil
+--------------------------------------------------------------------------------
+ベストモデル: GradientBoosting
+R2スコア: 0.0382
+RMSE: 0.0482
+MAE: 0.0382
+
+トップ3:
+  1. GradientBoosting: R2=0.0382
+     パラメータ: {'model__learning_rate': 0.01, 'model__max_depth': 3, 'model__n_estimators': 200}
+  2. SVR_RBF: R2=0.0371
+     パラメータ: {'model__C': 1.0, 'model__gamma': 0.01}
+  3. RandomForest: R2=0.0364
+     パラメータ: {'model__max_depth': 3, 'model__min_samples_leaf': 1, 'model__min_samples_split': 15, 'model__n_estimators': 300}
+
+
+### gaze_z_inv_1000
+--------------------------------------------------------------------------------
+ベストモデル: LightGBM
+R2スコア: -0.1388
+RMSE: 121.3316
+MAE: 100.6535
+
+トップ3:
+  1. LightGBM: R2=-0.1388
+     パラメータ: {'model__learning_rate': 0.01, 'model__max_depth': 7, 'model__n_estimators': 50}
+  2. RandomForest: R2=-0.1444
+     パラメータ: {'model__max_depth': 3, 'model__min_samples_leaf': 1, 'model__min_samples_split': 15, 'model__n_estimators': 300}
+  3. GradientBoosting: R2=-0.1506
+     パラメータ: {'model__learning_rate': 0.01, 'model__max_depth': 3, 'model__n_estimators': 200}
+
+================================================================================

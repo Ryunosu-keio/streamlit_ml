@@ -1252,6 +1252,7 @@ class Stage1ManualOLS:
         self.scaler = None
         self.res_ = None
         self.params_ = None
+        self.term_names_ = None
         self.feature_names_in_ = None  # sklearn互換的に
         self.is_manual_ols_ = True
 
@@ -1302,6 +1303,7 @@ class Stage1ManualOLS:
             self.scaler = None
             Xs = Xd
 
+        self.term_names_in_ = np.array(list(Xd.columns), dtype=object)
         self.feature_names_in_ = np.array(list(Xs.columns), dtype=object)
 
         Xs_ = sm.add_constant(Xs, has_constant="add")
@@ -1324,7 +1326,9 @@ class Stage1ManualOLS:
             Xs = Xd
 
         # 学習時列順に合わせる
-        Xs = Xs.reindex(columns=list(self.feature_names_in_), fill_value=0.0)
+        if self.term_names_in_ is not None:
+            Xs = Xs.reindex(columns=list(self.term_names_in_), fill_value=0.0)
+        
         Xs_ = sm.add_constant(Xs, has_constant="add")
         return np.asarray(self.res_.predict(Xs_.values), dtype=float)
 
